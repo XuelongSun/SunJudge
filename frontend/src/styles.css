@@ -321,10 +321,135 @@ p {
   background: var(--panel-subtle);
 }
 
+.clickable-row {
+  cursor: pointer;
+}
+
+.el-table .is-selected-row > td.el-table__cell {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+
+.assignment-detail-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.assignment-rendered {
+  min-height: 40px;
+  color: var(--text);
+  line-height: 1.65;
+}
+
+.assignment-rendered h1,
+.assignment-rendered h2,
+.assignment-rendered h3,
+.assignment-rendered p,
+.assignment-rendered ul {
+  margin: 0 0 10px;
+}
+
+.assignment-rendered code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--panel-subtle);
+}
+
+.assignment-rules {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.assignment-rules > div,
+.evaluation-item {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.assignment-rules span,
+.evaluation-editor span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.assignment-rules strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.evaluation-editor {
+  display: grid;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+
+.evaluation-item {
+  display: grid;
+  gap: 10px;
+}
+
+.preview-panel {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.evaluation-preview {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 120px 1fr;
   gap: 12px;
+}
+
+.form-grid.wide {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.form-grid.triple {
+  grid-template-columns: minmax(0, 1fr) 140px 160px;
+}
+
+.submission-guide {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.submission-guide > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.submission-guide span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.submission-guide strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
 }
 
 .file-input {
@@ -415,7 +540,16 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .form-grid.wide,
+  .form-grid.triple {
+    grid-template-columns: 1fr;
+  }
+
   .student-state-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .assignment-rules {
     grid-template-columns: 1fr;
   }
 }

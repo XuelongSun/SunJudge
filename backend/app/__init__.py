@@ -10,6 +10,7 @@ from .config import Config
 from .extensions import db, login_manager, migrate
 from .models import User
 from .routes.admin import admin_bp
+from .routes.assignments import assignments_bp
 from .routes.auth import auth_bp
 from .routes.classes import classes_bp
 
@@ -27,6 +28,7 @@ def create_app(config_object: type[Config] | None = None) -> Flask:
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
     app.register_blueprint(classes_bp, url_prefix="/api/classes")
+    app.register_blueprint(assignments_bp, url_prefix="/api")
 
     register_cli(app)
     register_error_handlers(app)

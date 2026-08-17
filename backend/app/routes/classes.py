@@ -5,7 +5,7 @@ from http import HTTPStatus
 from flask import Blueprint, jsonify
 from flask_login import current_user, login_required
 
-from ..models import ClassRoster, CourseClass, CourseMember, User
+from ..models import ClassRoster, CourseClass, CourseMember, Submission, User, published_assignment_ids_for_class, table_has_columns
 
 
 classes_bp = Blueprint("classes", __name__)
@@ -45,5 +45,20 @@ def list_my_classes():
             "student_name": roster_entry.student_name if roster_entry else current_user.student_name,
             "registration_status": roster_entry.registration_status if roster_entry else None,
         }
+        published_assignment_ids = published_assignment_ids_for_class(course_class.id)
+        submitted_assignment_ids = set()
+        if published_assignment_ids and table_has_columns("submissions", {"assignment_id", "student_user_id"}):
+            rows = (
+                Submission.query.with_entities(Submission.assignment_id)
+                .filter(
+                    Submission.student_user_id == current_user.id,
+                    Submission.assignment_id.in_(published_assignment_ids),
+                )
+                .distinct()
+                .all()
+            )
+            submitted_assignment_ids = {int(row[0]) for row in rows}
+        data["pending_assignment_count"] = len([item for item in published_assignment_ids if item not in submitted_assignment_ids])
+        data["published_assignment_count"] = len(published_assignment_ids)
         result.append(data)
     return jsonify({"classes": result})
