@@ -58,6 +58,10 @@ def _login(client, username: str, password: str = "secret123"):
     return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
+def _confirm_assignment(client, assignment_id: int):
+    return client.post(f"/api/assignments/{assignment_id}/confirm-submission")
+
+
 def _assignment_payload(status: str = Assignment.STATUS_DRAFT):
     return {
         "title": "Homework 1",
@@ -72,12 +76,10 @@ def _assignment_payload(status: str = Assignment.STATUS_DRAFT):
             "max_size_mb": 1,
             "filename_template": "{student_id}_{assignment_code}{extension}",
         },
-        "rubric": {"text": "Completeness 60, clarity 40."},
-        "rubric_format": "text",
         "program_evaluations": [
             {
                 "name": "case 1",
-                "input": "1 2",
+                "args": "--mode sample 2",
                 "expected_output": "3",
                 "score_percent": 30,
                 "timeout_seconds": 2,
@@ -105,8 +107,9 @@ def test_teacher_can_save_draft_and_publish_assignment(client):
     assert assignment["type"] == Assignment.TYPE_HOMEWORK
     assert assignment["description_format"] == "markdown"
     assert assignment["file_rules"]["allowed_extensions"] == [".md", ".zip", ".jpg", ".png"]
-    assert assignment["program_evaluations"][0]["expected_output"] == "3"
-    assert assignment["ai_evaluations"][0]["grading_criteria"] == "Explain clarity and completeness."
+    assert assignment["program_evaluations"][0]["cases"][0]["expected_output"] == "3"
+    assert assignment["program_evaluations"][0]["cases"][0]["args"] == "--mode sample 2"
+    assert assignment["ai_evaluations"][0]["criteria_items"][0]["content"] == "Explain clarity and completeness."
 
     client.post("/api/auth/logout")
     _login(client, "OS202601-06")
@@ -131,6 +134,45 @@ def test_teacher_can_save_draft_and_publish_assignment(client):
     assert response.get_json()["classes"][0]["pending_assignment_count"] == 1
 
 
+def test_student_assignment_payload_hides_ai_evaluations(client):
+    class_id, *_ = _create_class_with_student(client.application)
+    _login(client, "teacher1")
+    assignment = client.post(
+        f"/api/admin/classes/{class_id}/assignments",
+        json=_assignment_payload(Assignment.STATUS_PUBLISHED),
+    ).get_json()["assignment"]
+    assert assignment["ai_evaluations"]
+
+    client.post("/api/auth/logout")
+    _login(client, "OS202601-06")
+    response = client.get(f"/api/classes/{class_id}/assignments")
+    assert response.status_code == 200
+    student_assignment = response.get_json()["assignments"][0]
+    assert student_assignment["ai_evaluations"] == []
+
+
+def test_teacher_can_delete_assignment(client):
+    class_id, *_ = _create_class_with_student(client.application)
+    _login(client, "teacher1")
+    assignment_id = client.post(
+        f"/api/admin/classes/{class_id}/assignments",
+        json=_assignment_payload(Assignment.STATUS_PUBLISHED),
+    ).get_json()["assignment"]["id"]
+
+    response = client.delete(f"/api/admin/assignments/{assignment_id}")
+    assert response.status_code == 200
+
+    response = client.get(f"/api/admin/classes/{class_id}/assignments")
+    assert response.status_code == 200
+    assert response.get_json()["assignments"] == []
+
+    client.post("/api/auth/logout")
+    _login(client, "OS202601-06")
+    response = client.get(f"/api/classes/{class_id}/assignments")
+    assert response.status_code == 200
+    assert response.get_json()["assignments"] == []
+
+
 def test_student_submission_requires_extension_and_filename_rules(client):
     class_id, *_ = _create_class_with_student(client.application)
     _login(client, "teacher1")
@@ -146,8 +188,10 @@ def test_student_submission_requires_extension_and_filename_rules(client):
         data={"file": (BytesIO(b"print('wrong')"), "OS202601-06_hw1.py")},
         content_type="multipart/form-data",
     )
-    assert bad_extension.status_code == 400
-    assert "extension" in " ".join(bad_extension.get_json()["details"]).lower()
+    assert bad_extension.status_code == 201
+    rejected_confirm = _confirm_assignment(client, assignment_id)
+    assert rejected_confirm.status_code == 400
+    assert "extension" in " ".join(rejected_confirm.get_json()["details"]).lower()
 
     bad_name = client.post(
         f"/api/assignments/{assignment_id}/submissions",
@@ -164,7 +208,7 @@ def test_student_submission_requires_extension_and_filename_rules(client):
     )
     assert response.status_code == 201
     submission = response.get_json()["submission"]
-    assert submission["status"] == Submission.STATUS_SUBMITTED
+    assert submission["status"] == Submission.STATUS_UPLOADED
     assert submission["validation_result"]["ok"] is True
 
 
@@ -237,5 +281,18 @@ def test_teacher_submission_overview_marks_missing_and_submitted(client):
     response = client.get(f"/api/admin/assignments/{assignment_id}/submissions")
     assert response.status_code == 200
     row = response.get_json()["submissions"][0]
-    assert row["state"] == "submitted"
+    assert row["state"] == "missing"
+    assert row["student_state"] == "uploaded"
     assert row["submission"]["original_filename"] == "OS202601-06_hw1.md"
+
+    client.post("/api/auth/logout")
+    _login(client, "OS202601-06")
+    assert _confirm_assignment(client, assignment_id).status_code == 200
+
+    client.post("/api/auth/logout")
+    _login(client, "teacher1")
+    response = client.get(f"/api/admin/assignments/{assignment_id}/submissions")
+    assert response.status_code == 200
+    row = response.get_json()["submissions"][0]
+    assert row["state"] == "submitted"
+    assert row["student_state"] == "submitted"

@@ -200,6 +200,7 @@ class Assignment(db.Model):
     late_policy = db.Column(db.String(255), nullable=True)
     max_score = db.Column(db.Float, nullable=False, default=100)
     file_rules_json = db.Column(db.JSON, nullable=False, default=dict)
+    submission_requirements_json = db.Column(db.JSON, nullable=False, default=list)
     rubric_json = db.Column(db.JSON, nullable=True)
     rubric_format = db.Column(db.String(20), nullable=False, default=FORMAT_TEXT)
     program_evaluations_json = db.Column(db.JSON, nullable=False, default=list)
@@ -229,6 +230,7 @@ class Assignment(db.Model):
             "late_policy": self.late_policy,
             "max_score": self.max_score,
             "file_rules": self.file_rules_json or {},
+            "submission_requirements": self.submission_requirements_json or _legacy_submission_requirements(self.file_rules_json),
             "rubric": self.rubric_json or {},
             "rubric_format": self.rubric_format,
             "program_evaluations": self.program_evaluations_json or [],
@@ -239,25 +241,49 @@ class Assignment(db.Model):
             "published_at": self.published_at.isoformat() if self.published_at else None,
         }
         if include_counts:
-            submitted_user_ids = {submission.student_user_id for submission in self.submissions}
+            expected_count = ClassRoster.query.filter_by(class_id=self.class_id).count()
+            required_keys = {
+                str(item.get("key"))
+                for item in self.submission_requirements_json or _legacy_submission_requirements(self.file_rules_json)
+                if item.get("required", True)
+            }
+            submitted_user_ids = _completed_student_user_ids(self.id, required_keys)
+            feedback_count = AssignmentGrade.query.filter_by(assignment_id=self.id, status=GradingResult.STATUS_PUBLISHED).count()
+            data["expected_submission_count"] = expected_count
             data["submission_count"] = len(submitted_user_ids)
+            data["feedback_count"] = feedback_count
             data["latest_submission_count"] = len(self.submissions)
         if student_user_id is not None:
+            data["ai_evaluations"] = []
             latest = self.latest_submission_for(student_user_id)
             data["submission"] = latest.to_dict() if latest else None
+            data["submissions"] = [submission.to_dict() for submission in self.latest_submissions_for(student_user_id)]
+            assignment_grade = AssignmentGrade.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()
+            data["assignment_grade"] = assignment_grade.to_public_dict() if assignment_grade else None
+            read = AssignmentRead.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()
+            data["read_at"] = read.read_at.isoformat() if read else None
         return data
 
-    def latest_submission_for(self, student_user_id: int) -> "Submission | None":
-        return (
-            Submission.query.filter_by(assignment_id=self.id, student_user_id=student_user_id)
-            .order_by(Submission.submitted_at.desc())
-            .first()
-        )
+    def latest_submission_for(self, student_user_id: int, submission_item_key: str | None = None) -> "Submission | None":
+        query = Submission.query.filter_by(assignment_id=self.id, student_user_id=student_user_id)
+        if submission_item_key is not None:
+            query = query.filter(Submission.submission_item_key == submission_item_key)
+        return query.order_by(Submission.submitted_at.desc(), Submission.id.desc()).first()
+
+    def latest_submissions_for(self, student_user_id: int) -> list["Submission"]:
+        submissions: list[Submission] = []
+        for requirement in self.submission_requirements_json or _legacy_submission_requirements(self.file_rules_json):
+            item_key = str(requirement.get("key") or "")
+            latest = self.latest_submission_for(student_user_id, item_key)
+            if latest:
+                submissions.append(latest)
+        return submissions
 
 
 class Submission(db.Model):
     __tablename__ = "submissions"
 
+    STATUS_UPLOADED = "uploaded"
     STATUS_SUBMITTED = "submitted"
     STATUS_LATE = "late"
 
@@ -266,6 +292,8 @@ class Submission(db.Model):
     student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     submitted_at = db.Column(db.DateTime, nullable=False, default=utc_now)
     original_filename = db.Column(db.String(255), nullable=False)
+    submission_item_key = db.Column(db.String(80), nullable=False, default="main")
+    submission_item_label = db.Column(db.String(120), nullable=True)
     file_path = db.Column(db.String(500), nullable=False)
     file_size = db.Column(db.Integer, nullable=False)
     status = db.Column(db.String(20), nullable=False, default=STATUS_SUBMITTED)
@@ -274,7 +302,11 @@ class Submission(db.Model):
     assignment = db.relationship("Assignment", backref="submissions")
     student = db.relationship("User", backref="submissions")
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self, include_private: bool = False) -> dict[str, object]:
+        grading_result = (self.grading_result.to_dict() if include_private else self.grading_result.to_public_dict()) if self.grading_result else None
+        latest_judge_run = (
+            JudgeRun.query.filter_by(submission_id=self.id).order_by(JudgeRun.created_at.desc(), JudgeRun.id.desc()).first()
+        )
         return {
             "id": self.id,
             "assignment_id": self.assignment_id,
@@ -282,10 +314,199 @@ class Submission(db.Model):
             "student": self.student.to_dict() if self.student else None,
             "submitted_at": self.submitted_at.isoformat(),
             "original_filename": self.original_filename,
+            "submission_item_key": self.submission_item_key,
+            "submission_item_label": self.submission_item_label,
             "file_size": self.file_size,
             "status": self.status,
             "validation_result": self.validation_result_json or {},
+            "grading_result": grading_result,
+            "latest_judge_run": latest_judge_run.to_dict(include_private=include_private) if latest_judge_run else None,
         }
+
+
+class AssignmentRead(db.Model):
+    __tablename__ = "assignment_reads"
+
+    id = db.Column(db.Integer, primary_key=True)
+    assignment_id = db.Column(db.Integer, db.ForeignKey("assignments.id"), nullable=False)
+    student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    read_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+
+    assignment = db.relationship("Assignment", backref="assignment_reads")
+    student = db.relationship("User", foreign_keys=[student_user_id], backref="assignment_reads")
+
+    __table_args__ = (db.UniqueConstraint("assignment_id", "student_user_id", name="uq_assignment_reads_assignment_student"),)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "assignment_id": self.assignment_id,
+            "student_user_id": self.student_user_id,
+            "read_at": self.read_at.isoformat(),
+        }
+
+
+class TeacherLLMConfig(db.Model):
+    __tablename__ = "teacher_llm_configs"
+
+    PROVIDER_DEEPSEEK = "deepseek"
+
+    id = db.Column(db.Integer, primary_key=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, unique=True)
+    provider = db.Column(db.String(40), nullable=False, default=PROVIDER_DEEPSEEK)
+    base_url = db.Column(db.String(255), nullable=False)
+    model = db.Column(db.String(120), nullable=False)
+    encrypted_api_key = db.Column(db.String(500), nullable=False)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+    teacher = db.relationship("User", backref="llm_config", uselist=False)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "teacher_id": self.teacher_id,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "model": self.model,
+            "enabled": self.enabled,
+            "has_api_key": bool(self.encrypted_api_key),
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+class JudgeRun(db.Model):
+    __tablename__ = "judge_runs"
+
+    STATUS_ACCEPTED = "accepted"
+    STATUS_WRONG_ANSWER = "wrong_answer"
+    STATUS_RUNTIME_ERROR = "runtime_error"
+    STATUS_TIME_LIMIT_EXCEEDED = "time_limit_exceeded"
+    STATUS_SKIPPED = "skipped"
+    STATUS_ERROR = "error"
+
+    id = db.Column(db.Integer, primary_key=True)
+    submission_id = db.Column(db.Integer, db.ForeignKey("submissions.id"), nullable=False)
+    status = db.Column(db.String(40), nullable=False)
+    score = db.Column(db.Float, nullable=False, default=0)
+    details_json = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+
+    submission = db.relationship("Submission", backref="judge_runs")
+
+    def to_dict(self, include_private: bool = False) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "submission_id": self.submission_id,
+            "status": self.status,
+            "score": self.score,
+            "details": (self.details_json or {}) if include_private else _masked_judge_details(self.details_json or {}),
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+class GradingResult(db.Model):
+    __tablename__ = "grading_results"
+
+    STATUS_PENDING = "pending"
+    STATUS_AUTO_GRADED = "auto_graded"
+    STATUS_REVIEWED = "reviewed"
+    STATUS_PUBLISHED = "published"
+
+    id = db.Column(db.Integer, primary_key=True)
+    submission_id = db.Column(db.Integer, db.ForeignKey("submissions.id"), nullable=False, unique=True)
+    auto_score = db.Column(db.Float, nullable=True)
+    llm_score = db.Column(db.Float, nullable=True)
+    final_score = db.Column(db.Float, nullable=True)
+    feedback = db.Column(db.Text, nullable=True)
+    teacher_comment = db.Column(db.Text, nullable=True)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    status = db.Column(db.String(30), nullable=False, default=STATUS_PENDING)
+    llm_details_json = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+    submission = db.relationship("Submission", backref=db.backref("grading_result", uselist=False))
+    reviewer = db.relationship("User", foreign_keys=[reviewed_by], backref="reviewed_grades")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "submission_id": self.submission_id,
+            "auto_score": self.auto_score,
+            "llm_score": self.llm_score,
+            "final_score": self.final_score,
+            "feedback": self.feedback,
+            "teacher_comment": self.teacher_comment,
+            "reviewed_by": self.reviewed_by,
+            "status": self.status,
+            "llm_details": self.llm_details_json or {},
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+    def to_public_dict(self) -> dict[str, object]:
+        data = self.to_dict()
+        data["llm_score"] = None
+        data["llm_details"] = {}
+        if self.status != self.STATUS_PUBLISHED:
+            data["final_score"] = None
+            data["feedback"] = None
+            data["teacher_comment"] = None
+        return data
+
+
+class AssignmentGrade(db.Model):
+    __tablename__ = "assignment_grades"
+
+    id = db.Column(db.Integer, primary_key=True)
+    assignment_id = db.Column(db.Integer, db.ForeignKey("assignments.id"), nullable=False)
+    student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    auto_score = db.Column(db.Float, nullable=True)
+    llm_score = db.Column(db.Float, nullable=True)
+    final_score = db.Column(db.Float, nullable=True)
+    feedback = db.Column(db.Text, nullable=True)
+    teacher_comment = db.Column(db.Text, nullable=True)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    status = db.Column(db.String(30), nullable=False, default=GradingResult.STATUS_PENDING)
+    llm_details_json = db.Column(db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+    assignment = db.relationship("Assignment", backref="assignment_grades")
+    student = db.relationship("User", foreign_keys=[student_user_id], backref="assignment_grades")
+    reviewer = db.relationship("User", foreign_keys=[reviewed_by], backref="reviewed_assignment_grades")
+
+    __table_args__ = (db.UniqueConstraint("assignment_id", "student_user_id", name="uq_assignment_grades_assignment_student"),)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "assignment_id": self.assignment_id,
+            "student_user_id": self.student_user_id,
+            "auto_score": self.auto_score,
+            "llm_score": self.llm_score,
+            "final_score": self.final_score,
+            "feedback": self.feedback,
+            "teacher_comment": self.teacher_comment,
+            "reviewed_by": self.reviewed_by,
+            "status": self.status,
+            "llm_details": self.llm_details_json or {},
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+    def to_public_dict(self) -> dict[str, object]:
+        data = self.to_dict()
+        data["llm_score"] = None
+        data["llm_details"] = {}
+        if self.status != GradingResult.STATUS_PUBLISHED:
+            data["auto_score"] = None
+            data["final_score"] = None
+            data["feedback"] = None
+            data["teacher_comment"] = None
+        return data
 
 
 class AuditLog(db.Model):
@@ -329,3 +550,45 @@ def published_assignment_ids_for_class(class_id: int) -> list[int]:
         .all()
     )
     return [int(row[0]) for row in rows]
+
+
+def _legacy_submission_requirements(file_rules: dict[str, object] | None) -> list[dict[str, object]]:
+    return [{"key": "main", "label": "提交文件", **(file_rules or {})}]
+
+
+def _completed_student_user_ids(assignment_id: int, required_keys: set[str]) -> set[int]:
+    if not required_keys:
+        return {int(row[0]) for row in db.session.query(Submission.student_user_id).filter(Submission.assignment_id == assignment_id, Submission.status.in_({Submission.STATUS_SUBMITTED, Submission.STATUS_LATE})).distinct().all()}
+    rows = (
+        db.session.query(Submission.student_user_id, Submission.submission_item_key)
+        .filter(Submission.assignment_id == assignment_id, Submission.submission_item_key.in_(required_keys), Submission.status.in_({Submission.STATUS_SUBMITTED, Submission.STATUS_LATE}))
+        .all()
+    )
+    submitted_by_student: dict[int, set[str]] = {}
+    for student_user_id, item_key in rows:
+        submitted_by_student.setdefault(int(student_user_id), set()).add(str(item_key))
+    return {student_user_id for student_user_id, submitted_keys in submitted_by_student.items() if required_keys.issubset(submitted_keys)}
+
+
+def _masked_judge_details(details: dict[str, object]) -> dict[str, object]:
+    masked = dict(details)
+    cases = masked.get("cases")
+    if not isinstance(cases, list):
+        return masked
+
+    masked_cases: list[object] = []
+    for raw_case in cases:
+        if not isinstance(raw_case, dict):
+            masked_cases.append(raw_case)
+            continue
+        case = dict(raw_case)
+        if case.get("is_hidden"):
+            case["input"] = None
+            case["expected_output"] = None
+            case["args"] = None
+            case["stdout"] = None
+            case["stderr"] = None
+            case["diff"] = None
+        masked_cases.append(case)
+    masked["cases"] = masked_cases
+    return masked

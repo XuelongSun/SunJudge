@@ -13,6 +13,7 @@ from .routes.admin import admin_bp
 from .routes.assignments import assignments_bp
 from .routes.auth import auth_bp
 from .routes.classes import classes_bp
+from .services.grading_queue import init_grading_queue
 
 
 def create_app(config_object: type[Config] | None = None) -> Flask:
@@ -32,6 +33,7 @@ def create_app(config_object: type[Config] | None = None) -> Flask:
 
     register_cli(app)
     register_error_handlers(app)
+    init_grading_queue(app)
 
     return app
 

@@ -67,8 +67,12 @@ export interface RegisterPayload {
 
 export type AssignmentType = 'homework' | 'lab_report'
 export type AssignmentStatus = 'draft' | 'published'
-export type SubmissionStatus = 'submitted' | 'late'
-export type TextFormat = 'text' | 'markdown'
+export type SubmissionStatus = 'uploaded' | 'submitted' | 'late'
+export type TextFormat = 'markdown'
+export type GradingStatus = 'pending' | 'auto_graded' | 'reviewed' | 'published'
+export type JudgeStatus = 'accepted' | 'wrong_answer' | 'runtime_error' | 'time_limit_exceeded' | 'skipped' | 'error'
+export type StudentSubmissionState = 'unread' | 'read' | 'uploaded' | 'submitted'
+export type TeacherGradingState = 'needs_grading' | 'needs_review' | 'reviewed' | 'published'
 
 export interface FileRules {
   allowed_extensions: string[]
@@ -76,19 +80,37 @@ export interface FileRules {
   filename_template: string
 }
 
-export interface ProgramEvaluation {
+export interface SubmissionRequirement extends FileRules {
+  key: string
+  label: string
+  required: boolean
+}
+
+export interface ProgramTestCase {
   name: string
-  input: string
+  args: string
   expected_output: string
   score_percent: number
   timeout_seconds?: number
   is_hidden?: boolean
 }
 
+export interface ProgramEvaluation {
+  name: string
+  input_file_key: string
+  score_percent?: number
+  cases: ProgramTestCase[]
+}
+
 export interface AiEvaluation {
   name: string
+  input_file_key: string
   input: string
-  grading_criteria: string
+  grading_criteria?: string
+  criteria_items: Array<{
+    content: string
+    weight: number
+  }>
   score_percent: number
 }
 
@@ -99,6 +121,8 @@ export interface Submission {
   student: User | null
   submitted_at: string
   original_filename: string
+  submission_item_key: string
+  submission_item_label: string | null
   file_size: number
   status: SubmissionStatus
   validation_result: {
@@ -109,6 +133,74 @@ export interface Submission {
     size: number
     checks: Array<{ ok: boolean; message: string }>
   }
+  grading_result: GradingResult | null
+  latest_judge_run: JudgeRun | null
+}
+
+export interface JudgeRun {
+  id: number
+  submission_id: number
+  status: JudgeStatus
+  score: number
+  details: {
+    message?: string
+    cases?: Array<{
+      name: string
+      status: JudgeStatus
+      score: number
+      score_percent: number
+      timeout_seconds: number
+      is_hidden: boolean
+      args?: string | null
+      expected_output?: string | null
+      stdout?: string | null
+      stderr?: string | null
+      diff?: {
+        line: number | null
+        expected: string
+        actual: string
+      } | null
+    }>
+    [key: string]: unknown
+  }
+  created_at: string
+}
+
+export interface GradingResult {
+  id: number
+  submission_id?: number
+  assignment_id?: number
+  student_user_id?: number
+  auto_score: number | null
+  llm_score: number | null
+  final_score: number | null
+  feedback: string | null
+  teacher_comment: string | null
+  reviewed_by: number | null
+  status: GradingStatus
+  llm_details: {
+    status?: string
+    message?: string
+    modules?: unknown[]
+    manual_file_keys?: string[]
+    file_reviews?: FileReview[]
+    feedback_report_markdown?: string
+    [key: string]: unknown
+  }
+  created_at: string
+  updated_at: string
+}
+
+export interface TeacherLLMConfig {
+  id: number
+  teacher_id: number
+  provider: string
+  base_url: string
+  model: string
+  enabled: boolean
+  has_api_key: boolean
+  created_at: string
+  updated_at: string
 }
 
 export interface Assignment {
@@ -125,6 +217,7 @@ export interface Assignment {
   late_policy: string | null
   max_score: number
   file_rules: FileRules
+  submission_requirements: SubmissionRequirement[]
   rubric: { text?: string; [key: string]: unknown }
   rubric_format: TextFormat
   program_evaluations: ProgramEvaluation[]
@@ -133,15 +226,48 @@ export interface Assignment {
   created_at: string
   updated_at: string
   published_at: string | null
+  read_at?: string | null
+  expected_submission_count?: number
   submission_count?: number
+  feedback_count?: number
   latest_submission_count?: number
   submission?: Submission | null
+  submissions?: Submission[]
+  assignment_grade?: GradingResult | null
 }
 
 export interface AssignmentSubmissionRow {
   roster: RosterEntry
   submission: Submission | null
+  submissions: Submission[]
+  assignment_grade: GradingResult | null
   state: 'submitted' | 'missing'
+  student_state?: StudentSubmissionState
+  teacher_state?: TeacherGradingState
+  final_score?: number | null
+  read_at?: string | null
+}
+
+export type FileReviewStatus = 'pending' | 'confirmed'
+
+export interface FileReview {
+  submission_id?: number | null
+  submission_item_key: string
+  submission_item_label: string
+  filename: string
+  review_kind: 'manual' | 'program' | 'ai'
+  review_status?: FileReviewStatus
+  score: number
+  weight_percent?: number
+  max_score?: number
+  comment: string
+}
+
+export interface SubmissionPreview {
+  submission: Submission
+  previewable: boolean
+  content: string | null
+  message?: string
 }
 
 export interface AssignmentPayload {
@@ -155,6 +281,7 @@ export interface AssignmentPayload {
   late_policy?: string
   max_score: number
   file_rules: FileRules
+  submission_requirements: SubmissionRequirement[]
   rubric?: { text?: string }
   rubric_format: TextFormat
   program_evaluations: ProgramEvaluation[]
@@ -247,8 +374,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
-  updateAssignment: (assignmentId: number, payload: AssignmentPayload) =>
-    request<{ assignment: Assignment }>(`/api/admin/assignments/${assignmentId}`, {
+  updateAssignment: (assignmentId: number, payload: AssignmentPayload & { reset_grading?: boolean }) =>
+    request<{ assignment: Assignment; reset_grading?: boolean; rerun_count?: number }>(`/api/admin/assignments/${assignmentId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload)
     }),
@@ -256,14 +383,51 @@ export const api = {
     request<{ assignment: Assignment }>(`/api/admin/assignments/${assignmentId}/publish`, {
       method: 'POST'
     }),
+  deleteAssignment: (assignmentId: number) =>
+    request<{ message: string; class_id: number }>(`/api/admin/assignments/${assignmentId}`, {
+      method: 'DELETE'
+    }),
   listAssignmentSubmissions: (assignmentId: number) =>
     request<{ assignment: Assignment; submissions: AssignmentSubmissionRow[] }>(`/api/admin/assignments/${assignmentId}/submissions`),
+  rerunSubmissionGrading: (submissionId: number) =>
+    request<{ submission: Submission; assignment_grade: GradingResult }>(`/api/admin/submissions/${submissionId}/rerun-grading`, {
+      method: 'POST'
+    }),
+  returnSubmissionForResubmit: (submissionId: number) =>
+    request<{ message: string; assignment: Assignment }>(`/api/admin/submissions/${submissionId}/return`, {
+      method: 'POST'
+    }),
+  reviewSubmissionGrade: (
+    submissionId: number,
+    payload: { final_score: number; feedback?: string; teacher_comment?: string; reason?: string; status?: GradingStatus; file_reviews?: FileReview[] }
+  ) =>
+    request<{ submission: Submission; assignment_grade: GradingResult; grading_result: GradingResult }>(`/api/admin/submissions/${submissionId}/grade`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    }),
+  getLLMConfig: () => request<{ config: TeacherLLMConfig | null }>('/api/admin/llm-config'),
+  submissionDownloadUrl: (submissionId: number) => `/api/admin/submissions/${submissionId}/download`,
+  previewSubmission: (submissionId: number) => request<SubmissionPreview>(`/api/admin/submissions/${submissionId}/preview`),
+  saveLLMConfig: (payload: { provider?: string; base_url: string; model: string; api_key?: string; enabled: boolean }) =>
+    request<{ config: TeacherLLMConfig }>('/api/admin/llm-config', {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }),
   listStudentAssignments: (classId: number) =>
     request<{ class: PublicClass; assignments: Assignment[] }>(`/api/classes/${classId}/assignments`),
+  markAssignmentRead: (assignmentId: number) =>
+    request<{ read: { id: number; assignment_id: number; student_user_id: number; read_at: string }; assignment: Assignment }>(
+      `/api/assignments/${assignmentId}/read`,
+      { method: 'POST' }
+    ),
   submitAssignment: (assignmentId: number, formData: FormData) =>
-    request<{ submission: Submission }>(`/api/assignments/${assignmentId}/submissions`, {
+    request<{ submission: Submission; assignment_grade: GradingResult | null }>(`/api/assignments/${assignmentId}/submissions`, {
       method: 'POST',
       headers: {},
       body: formData
+    }),
+  confirmAssignmentSubmission: (assignmentId: number) =>
+    request<{ assignment: Assignment; assignment_grade: GradingResult | null; queue_status: 'queued' | 'inline' }>(`/api/assignments/${assignmentId}/confirm-submission`, {
+      method: 'POST'
     })
 }

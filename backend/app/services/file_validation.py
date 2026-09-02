@@ -12,6 +12,7 @@ from .accounts import StudentIdError, validate_student_id
 
 SUPPORTED_EXTENSIONS = {".py", ".md", ".zip", ".jpg", ".png"}
 TEXT_EXTENSIONS = {".py", ".md"}
+SUBMISSION_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 SIGNATURES = {
     ".zip": (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
     ".jpg": (b"\xff\xd8\xff",),
@@ -101,10 +102,46 @@ def normalize_file_rules(raw_rules: dict[str, object] | None, assignment_type: s
     }
 
 
+def normalize_submission_requirements(raw_requirements: object, assignment_type: str) -> list[dict[str, object]]:
+    if raw_requirements in (None, ""):
+        return [{"key": "main", "label": "提交文件", **default_file_rules(assignment_type), "required": True}]
+    if not isinstance(raw_requirements, list):
+        raise FileValidationError("Submission requirements must be a list.")
+    if not raw_requirements:
+        raise FileValidationError("At least one submission file item is required.")
+
+    normalized: list[dict[str, object]] = []
+    seen_keys: set[str] = set()
+    for index, item in enumerate(raw_requirements, start=1):
+        if not isinstance(item, dict):
+            raise FileValidationError("Each submission file item must be an object.")
+        key = str(item.get("key") or f"file{index}").strip()
+        if not SUBMISSION_KEY_PATTERN.fullmatch(key):
+            raise FileValidationError("Submission file item key must use 1-40 letters, digits, underscores or hyphens.")
+        if key in seen_keys:
+            raise FileValidationError(f"Duplicate submission file item key: {key}.")
+        seen_keys.add(key)
+        label = str(item.get("label") or item.get("name") or key).strip()
+        if not label:
+            raise FileValidationError("Submission file item label cannot be empty.")
+        normalized.append(
+            {
+                "key": key,
+                "label": label,
+                **normalize_file_rules(item, assignment_type),
+                "required": bool(item.get("required", True)),
+            }
+        )
+    return normalized
+
+
 def validate_submission_file(
     uploaded_file: FileStorage,
     rules: dict[str, object],
     context: FileValidationContext,
+    *,
+    check_content: bool = True,
+    filename_only: bool = False,
 ) -> FileValidationResult:
     filename = Path(uploaded_file.filename or "").name
     if not filename:
@@ -121,13 +158,64 @@ def validate_submission_file(
     size = _stream_size(uploaded_file.stream)
     max_size = int(float(rules["max_size_mb"]) * 1024 * 1024)
 
+    if filename_only:
+        checks = [
+            _check(filename == expected_filename, f"Filename should be {expected_filename}."),
+        ]
+    else:
+        allowed_text = ", ".join(allowed_extensions)
+        checks = [
+            _check(extension in allowed_extensions, "File extension must be one of: " + allowed_text + "."),
+            _check(size > 0, "Submitted file cannot be empty."),
+            _check(size <= max_size, "File must not exceed " + str(rules["max_size_mb"]) + " MB."),
+            _check(filename == expected_filename, f"Filename should be {expected_filename}."),
+        ]
+        if check_content:
+            checks.extend(_basic_content_checks(uploaded_file.stream, extension))
+
+    failed = [str(check["message"]) for check in checks if not check["ok"]]
+    if failed:
+        raise FileValidationError("Submission file did not pass validation.", failed)
+    return FileValidationResult(
+        ok=True,
+        filename=filename,
+        expected_filename=expected_filename,
+        extension=extension,
+        size=size,
+        checks=checks,
+    )
+
+
+def validate_saved_submission_file(
+    file_path: Path,
+    original_filename: str,
+    rules: dict[str, object],
+    context: FileValidationContext,
+) -> FileValidationResult:
+    filename = Path(original_filename or "").name
+    if not filename:
+        raise FileValidationError("Submitted file is missing its original filename.")
+
+    try:
+        validate_student_id(context.student_id)
+    except StudentIdError as exc:
+        raise FileValidationError(str(exc)) from exc
+
+    extension = Path(filename).suffix.lower()
+    allowed_extensions = [str(item).lower() for item in rules["allowed_extensions"]]
+    allowed_text = ", ".join(allowed_extensions)
+    expected_filename = render_filename_template(rules["filename_template"], context, extension)
+    size = file_path.stat().st_size if file_path.exists() else 0
+    max_size = int(float(rules["max_size_mb"]) * 1024 * 1024)
     checks = [
-        _check(extension in allowed_extensions, f"File extension must be one of: {', '.join(allowed_extensions)}."),
+        _check(extension in allowed_extensions, "File extension must be one of: " + allowed_text + "."),
         _check(size > 0, "Submitted file cannot be empty."),
-        _check(size <= max_size, f"File must not exceed {rules['max_size_mb']} MB."),
+        _check(size <= max_size, "File must not exceed " + str(rules["max_size_mb"]) + " MB."),
         _check(filename == expected_filename, f"Filename should be {expected_filename}."),
     ]
-    checks.extend(_basic_content_checks(uploaded_file.stream, extension))
+    if file_path.exists():
+        with file_path.open("rb") as stream:
+            checks.extend(_basic_content_checks(stream, extension))
 
     failed = [str(check["message"]) for check in checks if not check["ok"]]
     if failed:

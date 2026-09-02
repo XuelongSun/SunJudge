@@ -71,7 +71,7 @@ body {
 }
 
 .shell {
-  width: min(1200px, calc(100% - 36px));
+  width: min(1440px, calc(100% - 36px));
   margin: 0 auto;
   padding: 34px 0 48px;
 }
@@ -97,7 +97,7 @@ body {
 .row-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   justify-content: flex-start;
   white-space: nowrap;
 }
@@ -271,7 +271,7 @@ p {
 
 .student-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
   min-width: 0;
@@ -339,15 +339,19 @@ p {
 
 .assignment-rendered {
   min-height: 40px;
+  max-width: 100%;
   color: var(--text);
   line-height: 1.65;
+  overflow-wrap: anywhere;
 }
 
 .assignment-rendered h1,
 .assignment-rendered h2,
 .assignment-rendered h3,
 .assignment-rendered p,
-.assignment-rendered ul {
+.assignment-rendered ul,
+.assignment-rendered table,
+.assignment-rendered pre {
   margin: 0 0 10px;
 }
 
@@ -355,6 +359,45 @@ p {
   padding: 2px 5px;
   border-radius: 4px;
   background: var(--panel-subtle);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.assignment-rendered pre {
+  max-width: 100%;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.assignment-rendered pre code {
+  display: block;
+  padding: 0;
+  white-space: pre;
+  background: transparent;
+}
+
+.assignment-rendered table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-spacing: 0;
+  border-collapse: collapse;
+}
+
+.assignment-rendered th,
+.assignment-rendered td {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.assignment-rendered th {
+  background: var(--panel-subtle);
+  font-weight: 700;
 }
 
 .assignment-rules {
@@ -409,6 +452,205 @@ p {
   gap: 10px;
   padding-top: 14px;
   border-top: 1px solid var(--border);
+}
+
+.markdown-edit-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.05fr);
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 16px;
+}
+
+.assignment-editor-dialog .el-dialog__body {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 20px 28px 96px;
+}
+
+.assignment-editor-dialog .el-dialog__footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  border-top: 1px solid var(--border);
+  background: var(--panel-bg);
+}
+
+.assignment-markdown-grid .el-form-item {
+  margin-bottom: 0;
+}
+
+.markdown-live-preview {
+  min-height: 420px;
+  max-height: 62vh;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+  overflow: auto;
+}
+
+.preview-title {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.submission-files {
+  display: grid;
+  gap: 4px;
+}
+
+.submission-files > div {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.submission-files strong {
+  font-size: 12px;
+}
+
+.submission-files span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.published-feedback-panel,
+.file-review-editor {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.review-files-panel,
+.review-report-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.review-file-list,
+.ai-report-list {
+  display: grid;
+  gap: 10px;
+}
+
+.review-file-card,
+.review-report-block,
+.ai-report-item,
+.file-review-item {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.review-file-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-file-card > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.review-file-card span,
+.muted-line {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.judge-run-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.judge-run-summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+}
+
+.judge-run-summary span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.judge-run-summary strong {
+  overflow-wrap: anywhere;
+}
+.judge-case-detail {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.judge-case-detail span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.judge-case-detail pre {
+  min-height: 72px;
+  max-height: 180px;
+  margin: 4px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.file-review-item {
+  display: grid;
+  gap: 10px;
+}
+
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 0;
+}
+
+.assignment-rendered .hljs {
+  max-width: 100%;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+:root[data-theme='dark'] .assignment-rendered .hljs {
+  color: var(--text);
+  background: var(--panel-subtle);
 }
 
 .form-grid {
@@ -508,7 +750,7 @@ p {
 
 @media (max-width: 860px) {
   .shell {
-    width: min(100% - 20px, 1200px);
+    width: min(100% - 20px, 1440px);
     padding: 24px 0;
   }
 
@@ -551,5 +793,125 @@ p {
 
   .assignment-rules {
     grid-template-columns: 1fr;
+  }
+
+  .markdown-edit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .markdown-live-preview {
+    min-height: 260px;
+    max-height: none;
+  }
+
+  .review-file-card,
+  .judge-case-detail {
+    grid-template-columns: 1fr;
+  }
+
+  .review-file-card {
+    align-items: stretch;
+  }
+}
+
+.grade-review-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: -6px 0 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel-bg) 94%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+
+.grade-review-sticky-header > div {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  min-width: 0;
+  text-align: center;
+}
+
+.grade-review-sticky-header span,
+.review-section-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.grade-review-sticky-header strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.redesigned-review-editor {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.review-work-card {
+  gap: 14px;
+  background: var(--panel-bg);
+}
+
+.review-result-section {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+@media (max-width: 860px) {
+  .grade-review-sticky-header {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.status-triplet {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.assignment-confirm-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.assignment-confirm-bar > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.assignment-confirm-bar span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .assignment-confirm-bar {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
