@@ -886,6 +886,40 @@ p {
   gap: 6px;
   align-items: center;
 }
+.analysis-grid,
+.student-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.analysis-grid > div,
+.student-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.analysis-grid span,
+.student-summary-grid span,
+.analysis-grid small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.analysis-grid strong,
+.student-summary-grid strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .assignment-confirm-bar {
   display: flex;
   align-items: center;
@@ -910,6 +944,11 @@ p {
 }
 
 @media (max-width: 720px) {
+  .analysis-grid,
+  .student-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
   .assignment-confirm-bar {
     align-items: stretch;
     flex-direction: column;

@@ -5,7 +5,7 @@ from http import HTTPStatus
 from flask import Blueprint, jsonify
 from flask_login import current_user, login_required
 
-from ..models import Assignment, ClassRoster, CourseClass, CourseMember, Submission, User, published_assignment_ids_for_class, table_has_columns
+from ..models import Assignment, AssignmentGrade, ClassRoster, CourseClass, CourseMember, GradingResult, Submission, User, published_assignment_ids_for_class, table_has_columns
 
 
 classes_bp = Blueprint("classes", __name__)
@@ -47,13 +47,14 @@ def list_my_classes():
         }
         published_assignment_ids = published_assignment_ids_for_class(course_class.id)
         completed_assignment_ids = set()
-        if published_assignment_ids and table_has_columns("submissions", {"assignment_id", "student_user_id", "submission_item_key"}):
+        if published_assignment_ids and table_has_columns("submissions", {"assignment_id", "student_user_id", "submission_item_key", "status"}):
             assignments = Assignment.query.filter(Assignment.id.in_(published_assignment_ids)).all()
             rows = (
                 Submission.query.with_entities(Submission.assignment_id, Submission.submission_item_key)
                 .filter(
                     Submission.student_user_id == current_user.id,
                     Submission.assignment_id.in_(published_assignment_ids),
+                    Submission.status.in_({Submission.STATUS_SUBMITTED, Submission.STATUS_LATE}),
                 )
                 .distinct()
                 .all()
@@ -69,7 +70,24 @@ def list_my_classes():
                 }
                 if required_keys and required_keys.issubset(submitted_by_assignment.get(assignment.id, set())):
                     completed_assignment_ids.add(assignment.id)
+        published_assignment_count = len(published_assignment_ids)
+        completed_assignment_count = len(completed_assignment_ids)
+        published_grades = []
+        if published_assignment_ids and table_has_columns("assignment_grades", {"assignment_id", "student_user_id", "status", "final_score"}):
+            published_grades = (
+                AssignmentGrade.query.filter(
+                    AssignmentGrade.student_user_id == current_user.id,
+                    AssignmentGrade.assignment_id.in_(published_assignment_ids),
+                    AssignmentGrade.status == GradingResult.STATUS_PUBLISHED,
+                    AssignmentGrade.final_score.isnot(None),
+                )
+                .all()
+            )
+        scores = [float(grade.final_score) for grade in published_grades if grade.final_score is not None]
         data["pending_assignment_count"] = len([item for item in published_assignment_ids if item not in completed_assignment_ids])
-        data["published_assignment_count"] = len(published_assignment_ids)
+        data["published_assignment_count"] = published_assignment_count
+        data["completed_assignment_count"] = completed_assignment_count
+        data["published_grade_count"] = len(published_grades)
+        data["average_score"] = round(sum(scores) / len(scores), 2) if scores else None
         result.append(data)
     return jsonify({"classes": result})

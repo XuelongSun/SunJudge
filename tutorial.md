@@ -1,4 +1,4 @@
-﻿# SunJudge Tutorial
+# SunJudge Tutorial
 
 > 本文件记录技术实现细节、代码逻辑和里程碑设计。测试步骤、Bruno 接口测试和浏览器手测见 `test.md`。
 
@@ -835,7 +835,7 @@ backend/app/services/judge.py
 - 未被任何程序或 AI 评测模块引用的提交项默认为教师手动评阅。
 - LLM 外部调用尚未启用，需要明确授权学生提交内容可发送到教师配置的 OpenAI 兼容接口。
 - Docker CLI、镜像和容器运行环境需要由部署机器提供；没有 Docker 时不会执行程序评测。
-- M4 仍需补充学生端正式成绩查询、班级成绩统计、CSV 和 ScoreManagerCLI 导出。
+- M4 已补充学生端分班级成绩总览、教师端班级作业统计、CSV 和 ScoreManagerCLI 导出；后续可继续增强跨作业趋势图和分数分布图。
 
 ### 7.7 本地 SQLite 迁移修复
 
@@ -1154,3 +1154,19 @@ AI 评测已从占位状态升级为真实 OpenAI 兼容接口调用，核心文
 - 学生端反馈显示入口：frontend/src/App.vue 中 studentFeedbackDialogVisible 对应的批改反馈弹窗。
 
 修改建议：优先同时保持前端 generatedFeedbackReport() 和后端 _build_feedback_report() 的结构一致；如果新增字段，需要同步更新 FileReview 类型、reviewFilePayloads() 和后端 _normalize_file_reviews()。
+
+## M4 更新：成绩导出、班级成绩分析与学生总览
+
+教师端新增作业级成绩簿能力，核心逻辑在 backend/app/services/score_export.py：按教学班名单逐个生成成绩行，合并提交状态、提交时间、最终成绩、自动分、AI 建议分和教师评语，并计算完成情况、平均分、发布后平均提交天数、截止前平均提交天数和反馈数量。平均提交时间采用天数表达：发布后 n 天表示 submitted_at - published_at，截止前 n 天表示 deadline - submitted_at，若为负数表示迟交。
+
+新增教师接口：
+
+- GET /api/admin/assignments/<assignment_id>/grades：返回成绩簿行和 analysis 汇总。
+- GET /api/admin/assignments/<assignment_id>/grades.csv：导出 UTF-8 BOM CSV，便于 Excel 直接打开中文列名。
+- GET /api/admin/assignments/<assignment_id>/scoremanager-commands：导出可复制的 ScoreManagerCLI 命令文本，只使用已复核或已发布且有 final_score 的成绩。
+
+ScoreManagerCLI 导出前会先调用 short_student_no(student_id) 校验学生编号格式，再取短编号，避免把不合法编号静默截断。普通成绩默认按同分合并生成 brd；也可以关闭合并逐条生成 rd。实验成绩使用 lab rd。接口只返回命令文本，不会自动调用外部 CLI。
+
+教师端提交状态抽屉现在显示统计卡，并提供 CSV 和 ScoreManagerCLI 导出入口。学生端“我的班级”按班级显示已发布、已完成、待提交、已反馈和平均分；进入某个班级后，作业列表增加已发布成绩列，方便学生区分不同教学班的完成和反馈情况。
+
+当前限制：M4 的分析维度以单个作业和单个教学班为主，暂不提供跨作业趋势图或分数分布图；CSV 为单作业导出，不生成多 sheet Excel；平均提交时间只统计已完成必交项的学生。

@@ -35,6 +35,9 @@ export interface PublicClass {
   }
   pending_assignment_count?: number
   published_assignment_count?: number
+  completed_assignment_count?: number
+  published_grade_count?: number
+  average_score?: number | null
 }
 
 export interface AdminClass extends PublicClass {
@@ -236,6 +239,18 @@ export interface Assignment {
   assignment_grade?: GradingResult | null
 }
 
+export interface AssignmentGradeAnalysis {
+  expected_count: number
+  submitted_count: number
+  missing_count: number
+  submitted_rate: number | null
+  reviewed_or_published_count: number
+  published_count: number
+  average_score: number | null
+  average_submit_days_after_publish: number | null
+  average_submit_days_before_deadline: number | null
+  max_score: number
+}
 export interface AssignmentSubmissionRow {
   roster: RosterEntry
   submission: Submission | null
@@ -388,7 +403,18 @@ export const api = {
       method: 'DELETE'
     }),
   listAssignmentSubmissions: (assignmentId: number) =>
-    request<{ assignment: Assignment; submissions: AssignmentSubmissionRow[] }>(`/api/admin/assignments/${assignmentId}/submissions`),
+    request<{ assignment: Assignment; analysis: AssignmentGradeAnalysis; submissions: AssignmentSubmissionRow[] }>(`/api/admin/assignments/${assignmentId}/submissions`),
+  listAssignmentGrades: (assignmentId: number) =>
+    request<{ assignment: Assignment; class: AdminClass; analysis: AssignmentGradeAnalysis; rows: Array<Record<string, unknown>> }>(`/api/admin/assignments/${assignmentId}/grades`),
+  assignmentGradesCsvUrl: (assignmentId: number) => `/api/admin/assignments/${assignmentId}/grades.csv`,
+  exportScoreManagerCommands: (assignmentId: number, params: { field: string; command_type: 'regular' | 'lab'; group_same_score: boolean }) => {
+    const query = new URLSearchParams({
+      field: params.field,
+      command_type: params.command_type,
+      group_same_score: params.group_same_score ? 'true' : 'false'
+    })
+    return request<{ assignment: Assignment; export: { field: string; command_type: 'regular' | 'lab'; group_same_score: boolean; commands: string; lines: string[]; exported_count: number; skipped: Array<Record<string, string>> } }>(`/api/admin/assignments/${assignmentId}/scoremanager-commands?${query.toString()}`)
+  },
   rerunSubmissionGrading: (submissionId: number) =>
     request<{ submission: Submission; assignment_grade: GradingResult }>(`/api/admin/submissions/${submissionId}/rerun-grading`, {
       method: 'POST'

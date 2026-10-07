@@ -1,4 +1,4 @@
-﻿# SunJudge Test Guide
+# SunJudge Test Guide
 
 > 本文件只记录测试方法。技术实现、代码逻辑和里程碑说明见 `tutorial.md`。
 
@@ -313,9 +313,10 @@ M3 后补充：
 
 M4 后补充：
 
-- 成绩发布。
+- 教师端成绩统计与成绩簿接口。
 - CSV 导出。
 - ScoreManagerCLI 命令导出。
+- 学生端分班级作业总览。
 
 ## 4. 常见排查
 
@@ -1195,3 +1196,30 @@ uv run pytest tests/test_m3_grading.py::test_student_read_status_and_published_f
 6. 学生端在教师发布反馈前不能看到 AI 评分、AI 细节或最终反馈；教师发布反馈后只能通过查看批改反馈入口查看最终分和 Markdown 反馈报告。
 
 注意：当前生产和开发环境的评测队列是进程内后台线程。若使用多进程 Gunicorn，高峰期建议先配置单独评测进程或尽快切换 Redis + RQ/Celery，避免任务分散在多个 Web worker 内存队列中。
+
+### M4 验收：成绩导出、班级分析与学生总览
+
+自动化验证：
+
+```shell
+cd backend
+python -m py_compile app/routes/assignments.py app/routes/classes.py app/services/score_export.py tests/test_m4_exports.py
+uv run pytest tests/test_m4_exports.py
+
+cd ../frontend
+npm run build
+```
+
+本次已验证结果：
+
+- Python 语法检查通过。
+- uv run pytest tests/test_m4_exports.py：2 passed。
+- npm run build：通过，Vite 成功写入 frontend/dist/index.html；仅有现有依赖注释和 chunk size 提示。
+
+手动验收步骤：
+
+1. 教师进入某个已发布作业的提交状态抽屉，应能看到完成情况、平均分、发布后提交、截止前提交、已反馈等统计卡。
+2. 点击 CSV，应下载包含 No.、姓名、学号、学生编号、提交状态、提交时间、最终分、自动分、AI 建议分和教师评语的单作业成绩表。
+3. 点击 ScoreManagerCLI，默认普通作业字段为 homework、实验报告字段为作业 code；已复核或已发布且有最终分的学生应生成 rd/brd 或 lab rd 命令。
+4. 如果名单中的 student_id 不符合 教学班别名-两位No. 格式，ScoreManagerCLI 导出应返回错误，不得跳过校验直接截取短编号。
+5. 学生进入“我的班级”，每个班级行应显示已发布、已完成、已反馈、平均分和待提交数量；切换班级后，详情表中成绩列只在教师发布反馈后显示。

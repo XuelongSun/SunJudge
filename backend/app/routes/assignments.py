@@ -7,7 +7,7 @@ import re
 import shlex
 from uuid import uuid4
 
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import Blueprint, Response, current_app, jsonify, request, send_file
 from flask_login import current_user, login_required
 from sqlalchemy import desc
 
@@ -38,6 +38,7 @@ from ..services.file_validation import (
     validate_submission_file,
 )
 from ..services.grading_queue import enqueue_auto_grading
+from ..services.score_export import build_assignment_grade_csv, build_assignment_gradebook, build_scoremanager_export
 from .permissions import roles_required
 
 
@@ -296,7 +297,79 @@ def list_assignment_submissions(assignment_id: int):
                 "read_at": read.read_at.isoformat() if read else None,
             }
         )
-    return jsonify({"assignment": assignment.to_dict(include_counts=True), "submissions": rows})
+    gradebook = build_assignment_gradebook(assignment)
+    return jsonify({"assignment": assignment.to_dict(include_counts=True), "analysis": gradebook["summary"], "submissions": rows})
+
+
+
+@assignments_bp.get("/admin/assignments/<int:assignment_id>/grades")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_ADMIN)
+def get_assignment_grades(assignment_id: int):
+    assignment = _get_managed_assignment_or_404(assignment_id)
+    if not assignment:
+        return jsonify({"message": "Assignment not found or not manageable."}), HTTPStatus.NOT_FOUND
+    gradebook = build_assignment_gradebook(assignment)
+    return jsonify(
+        {
+            "assignment": assignment.to_dict(include_counts=True),
+            "class": assignment.course_class.to_admin_dict(),
+            "analysis": gradebook["summary"],
+            "rows": gradebook["rows"],
+        }
+    )
+
+
+@assignments_bp.get("/admin/assignments/<int:assignment_id>/grades.csv")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_ADMIN)
+def export_assignment_grades_csv(assignment_id: int):
+    assignment = _get_managed_assignment_or_404(assignment_id)
+    if not assignment:
+        return jsonify({"message": "Assignment not found or not manageable."}), HTTPStatus.NOT_FOUND
+    csv_text = build_assignment_grade_csv(assignment)
+    filename = f"{assignment.course_class.alias}_{assignment.code}_grades.csv"
+    return Response(
+        csv_text,
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@assignments_bp.get("/admin/assignments/<int:assignment_id>/scoremanager-commands")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_ADMIN)
+def export_assignment_scoremanager_commands(assignment_id: int):
+    assignment = _get_managed_assignment_or_404(assignment_id)
+    if not assignment:
+        return jsonify({"message": "Assignment not found or not manageable."}), HTTPStatus.NOT_FOUND
+    default_field = assignment.code if assignment.type == Assignment.TYPE_LAB_REPORT else "homework"
+    field = str(request.args.get("field") or default_field).strip()
+    default_command_type = "lab" if assignment.type == Assignment.TYPE_LAB_REPORT else "regular"
+    command_type = str(request.args.get("command_type") or request.args.get("type") or default_command_type).strip()
+    group_same_score = _truthy_arg(request.args.get("group_same_score"), default=True)
+    export, invalid_students = build_scoremanager_export(
+        assignment,
+        field=field,
+        command_type=command_type,
+        group_same_score=group_same_score,
+    )
+    if invalid_students:
+        message = (
+            invalid_students[0].get("message")
+            if invalid_students and not invalid_students[0].get("student_id")
+            else "Student IDs must be valid before exporting ScoreManagerCLI commands."
+        )
+        return (
+            jsonify(
+                {
+                    "message": message,
+                    "invalid_students": invalid_students,
+                }
+            ),
+            HTTPStatus.BAD_REQUEST,
+        )
+    return jsonify({"assignment": assignment.to_dict(include_counts=True), "export": export})
 
 
 @assignments_bp.get("/admin/llm-config")
@@ -688,6 +761,12 @@ def confirm_assignment_submission(assignment_id: int):
             "queue_status": queue_status,
         }
     )
+
+
+def _truthy_arg(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 def _assignment_submission_query(assignment: Assignment, student_user_id: int | None = None):
     query = Submission.query.filter_by(assignment_id=assignment.id)

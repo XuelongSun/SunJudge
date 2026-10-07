@@ -27,6 +27,7 @@ import {
   type AdminClass,
   type Assignment,
   type AssignmentPayload,
+  type AssignmentGradeAnalysis,
   type AssignmentSubmissionRow,
   type AssignmentType,
   type AiEvaluation,
@@ -73,6 +74,7 @@ const roster = ref<RosterEntry[]>([])
 const managedAssignments = ref<Assignment[]>([])
 const studentAssignments = ref<Assignment[]>([])
 const submissionRows = ref<AssignmentSubmissionRow[]>([])
+const gradeAnalysis = ref<AssignmentGradeAnalysis | null>(null)
 const selectedAssignmentId = ref<number | undefined>()
 const selectedStudentAssignmentId = ref<number | undefined>()
 const selectedFile = ref<File | null>(null)
@@ -102,6 +104,7 @@ const gradeReviewDialogVisible = ref(false)
 const submissionPreviewDialogVisible = ref(false)
 const feedbackPreviewDialogVisible = ref(false)
 const studentFeedbackDialogVisible = ref(false)
+const scoreManagerDialogVisible = ref(false)
 const llmConfigDialogVisible = ref(false)
 const studentDialogVisible = ref(false)
 const classMetaDialogVisible = ref(false)
@@ -120,6 +123,7 @@ const reviewFileForms = ref<FileReview[]>([])
 const previewingSubmission = ref<Submission | null>(null)
 const submissionPreview = ref<SubmissionPreview | null>(null)
 const llmConfig = ref<TeacherLLMConfig | null>(null)
+const scoreManagerCommands = ref('')
 
 const loginForm = reactive({
   username: '',
@@ -218,6 +222,11 @@ const gradeReviewForm = reactive({
   status: 'reviewed' as GradingStatus
 })
 
+const scoreManagerForm = reactive({
+  field: 'homework',
+  command_type: 'regular' as 'regular' | 'lab',
+  group_same_score: true
+})
 const llmConfigForm = reactive({
   provider: 'deepseek',
   base_url: '',
@@ -592,6 +601,77 @@ function formatSize(value: number) {
   return `${(value / 1024 / 1024).toFixed(2)} MB`
 }
 
+function formatOptionalNumber(value?: number | null, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return '-'
+  }
+  return Number(value).toFixed(digits).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')
+}
+
+function formatPercent(value?: number | null) {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+  return `${Math.round(Number(value) * 100)}%`
+}
+
+function formatDays(value?: number | null) {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+  return `${formatOptionalNumber(value)} 天`
+}
+
+function studentClassAverageScore(courseClass: PublicClass) {
+  return courseClass.average_score === null || courseClass.average_score === undefined ? '-' : formatOptionalNumber(courseClass.average_score)
+}
+
+function exportAssignmentGradesCsv() {
+  if (!selectedAssignmentId.value) {
+    return
+  }
+  window.open(api.assignmentGradesCsvUrl(selectedAssignmentId.value), '_blank')
+}
+
+async function openScoreManagerDialog() {
+  if (!selectedAssignment.value || !selectedAssignmentId.value) {
+    return
+  }
+  scoreManagerForm.field = selectedAssignment.value.type === 'lab_report' ? selectedAssignment.value.code : 'homework'
+  scoreManagerForm.command_type = selectedAssignment.value.type === 'lab_report' ? 'lab' : 'regular'
+  scoreManagerForm.group_same_score = scoreManagerForm.command_type === 'regular'
+  scoreManagerCommands.value = ''
+  scoreManagerDialogVisible.value = true
+  await generateScoreManagerCommands()
+}
+
+async function generateScoreManagerCommands() {
+  if (!selectedAssignmentId.value) {
+    return
+  }
+  submissionLoading.value = true
+  try {
+    const result = await api.exportScoreManagerCommands(selectedAssignmentId.value, { ...scoreManagerForm })
+    scoreManagerCommands.value = result.export.commands
+    if (!result.export.exported_count) {
+      ElMessage.warning('暂无已复核或已发布的最终成绩可导出')
+    }
+  } catch (error) {
+    scoreManagerCommands.value = ''
+    ElMessage.error((error as Error).message)
+  } finally {
+    submissionLoading.value = false
+  }
+}
+
+async function copyScoreManagerCommands() {
+  if (!scoreManagerCommands.value) {
+    ElMessage.warning('暂无可复制命令')
+    return
+  }
+  await navigator.clipboard.writeText(scoreManagerCommands.value)
+  ElMessage.success('命令已复制')
+}
 function currentReviewSubmissions() {
   return reviewingSubmissionRow.value?.submissions ?? (reviewingSubmission.value ? [reviewingSubmission.value] : [])
 }
@@ -1037,6 +1117,7 @@ async function logout() {
   managedAssignments.value = []
   studentAssignments.value = []
   submissionRows.value = []
+  gradeAnalysis.value = null
   selectedClassId.value = undefined
   selectedStudentClassId.value = undefined
   selectedStudentAssignmentId.value = undefined
@@ -1718,6 +1799,10 @@ async function deleteAssignment(row: Assignment) {
 
 async function openSubmissionsDrawer(row: Assignment) {
   selectedAssignmentId.value = row.id
+  gradeAnalysis.value = null
+  scoreManagerForm.field = row.type === 'lab_report' ? row.code : 'homework'
+  scoreManagerForm.command_type = row.type === 'lab_report' ? 'lab' : 'regular'
+  scoreManagerForm.group_same_score = scoreManagerForm.command_type === 'regular'
   submissionsDrawerVisible.value = true
   await loadSubmissions(row.id)
 }
@@ -1726,6 +1811,7 @@ async function loadSubmissions(assignmentId: number) {
   submissionLoading.value = true
   try {
     const result = await api.listAssignmentSubmissions(assignmentId)
+    gradeAnalysis.value = result.analysis
     submissionRows.value = result.submissions
   } catch (error) {
     ElMessage.error((error as Error).message)
@@ -2155,6 +2241,18 @@ onMounted(() => {
             <el-table-column prop="course.name" label="课程" min-width="170" />
             <el-table-column v-if="!currentStudentClass" prop="course.teacher_name" label="教师" min-width="120" />
             <el-table-column prop="alias" label="别名" width="120" />
+            <el-table-column v-if="!currentStudentClass" label="已发布" width="90">
+              <template #default="{ row }">{{ row.published_assignment_count ?? 0 }}</template>
+            </el-table-column>
+            <el-table-column v-if="!currentStudentClass" label="已完成" width="90">
+              <template #default="{ row }">{{ row.completed_assignment_count ?? 0 }}</template>
+            </el-table-column>
+            <el-table-column v-if="!currentStudentClass" label="已反馈" width="90">
+              <template #default="{ row }">{{ row.published_grade_count ?? 0 }}</template>
+            </el-table-column>
+            <el-table-column v-if="!currentStudentClass" label="均分" width="90">
+              <template #default="{ row }">{{ studentClassAverageScore(row) }}</template>
+            </el-table-column>
             <el-table-column v-if="!currentStudentClass" prop="student.student_id" label="编号" min-width="150" />
             <el-table-column label="待提交" width="100">
               <template #default="{ row }">
@@ -2187,6 +2285,28 @@ onMounted(() => {
               <strong>{{ currentStudentClass.student?.student_id ?? currentUser.student_id }}</strong>
             </div>
           </div>
+          <div class="student-summary-grid">
+            <div>
+              <span>已发布</span>
+              <strong>{{ currentStudentClass.published_assignment_count ?? 0 }}</strong>
+            </div>
+            <div>
+              <span>已完成</span>
+              <strong>{{ currentStudentClass.completed_assignment_count ?? 0 }}</strong>
+            </div>
+            <div>
+              <span>待提交</span>
+              <strong>{{ currentStudentClass.pending_assignment_count ?? 0 }}</strong>
+            </div>
+            <div>
+              <span>已反馈</span>
+              <strong>{{ currentStudentClass.published_grade_count ?? 0 }}</strong>
+            </div>
+            <div>
+              <span>平均分</span>
+              <strong>{{ studentClassAverageScore(currentStudentClass) }}</strong>
+            </div>
+          </div>
           <el-table
             :data="studentAssignments"
             v-loading="assignmentLoading"
@@ -2208,6 +2328,9 @@ onMounted(() => {
               <template #default="{ row }">
                 <el-tag :type="studentGradeStatusType(row)" effect="plain">{{ studentGradeStatusLabel(row) }}</el-tag>
               </template>
+            </el-table-column>
+            <el-table-column label="成绩" width="100">
+              <template #default="{ row }">{{ row.assignment_grade?.status === 'published' ? `${row.assignment_grade.final_score ?? 0}/${row.max_score}` : '-' }}</template>
             </el-table-column>
           </el-table>
           <section v-if="selectedStudentAssignment" class="assignment-detail-panel">
@@ -2501,7 +2624,38 @@ onMounted(() => {
           <strong>{{ selectedAssignment?.code }}</strong>
           <span>按名单显示提交情况</span>
         </div>
-        <el-button :icon="Refresh" :loading="submissionLoading" @click="selectedAssignmentId && loadSubmissions(selectedAssignmentId)">刷新</el-button>
+        <div class="toolbar-actions">
+          <el-button :icon="Refresh" :loading="submissionLoading" @click="selectedAssignmentId && loadSubmissions(selectedAssignmentId)">刷新</el-button>
+          <el-button :icon="Download" @click="exportAssignmentGradesCsv">CSV</el-button>
+          <el-button type="primary" :icon="Files" @click="openScoreManagerDialog">ScoreManagerCLI</el-button>
+        </div>
+      </div>
+      <div v-if="gradeAnalysis" class="analysis-grid">
+        <div>
+          <span>完成情况</span>
+          <strong>{{ gradeAnalysis.submitted_count }}/{{ gradeAnalysis.expected_count }}</strong>
+          <small>{{ formatPercent(gradeAnalysis.submitted_rate) }}</small>
+        </div>
+        <div>
+          <span>平均分</span>
+          <strong>{{ formatOptionalNumber(gradeAnalysis.average_score) }}</strong>
+          <small>/ {{ gradeAnalysis.max_score }}</small>
+        </div>
+        <div>
+          <span>发布后提交</span>
+          <strong>{{ formatDays(gradeAnalysis.average_submit_days_after_publish) }}</strong>
+          <small>平均值</small>
+        </div>
+        <div>
+          <span>截止前提交</span>
+          <strong>{{ formatDays(gradeAnalysis.average_submit_days_before_deadline) }}</strong>
+          <small>负数表示迟交</small>
+        </div>
+        <div>
+          <span>已反馈</span>
+          <strong>{{ gradeAnalysis.published_count }}</strong>
+          <small>已复核/发布 {{ gradeAnalysis.reviewed_or_published_count }}</small>
+        </div>
       </div>
       <el-table
         :data="submissionRows"
@@ -2530,6 +2684,32 @@ onMounted(() => {
       </el-table>
     </el-drawer>
 
+        <el-dialog v-model="scoreManagerDialogVisible" title="ScoreManagerCLI 导出" width="min(760px, 94vw)">
+      <el-form label-position="top" @submit.prevent>
+        <div class="form-grid wide">
+          <el-form-item label="目标字段">
+            <el-input v-model="scoreManagerForm.field" placeholder="homework / exp1" @change="generateScoreManagerCommands" />
+          </el-form-item>
+          <el-form-item label="命令类型">
+            <el-select v-model="scoreManagerForm.command_type" @change="generateScoreManagerCommands">
+              <el-option label="普通成绩 rd/brd" value="regular" />
+              <el-option label="实验成绩 lab rd" value="lab" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <el-checkbox v-if="scoreManagerForm.command_type === 'regular'" v-model="scoreManagerForm.group_same_score" @change="generateScoreManagerCommands">
+          同分合并为 brd
+        </el-checkbox>
+        <el-form-item label="命令文本">
+          <el-input v-model="scoreManagerCommands" type="textarea" :rows="12" readonly placeholder="暂无可导出的已复核或已发布成绩" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="scoreManagerDialogVisible = false">关闭</el-button>
+        <el-button :icon="Refresh" :loading="submissionLoading" @click="generateScoreManagerCommands">刷新命令</el-button>
+        <el-button type="primary" :icon="Check" @click="copyScoreManagerCommands">复制</el-button>
+      </template>
+    </el-dialog>
     <el-dialog v-model="gradeReviewDialogVisible" title="作业批改" width="min(1120px, 96vw)" class="grade-review-dialog">
       <el-form label-position="top" @submit.prevent>
         <section v-if="reviewingSubmission" class="grade-review-sticky-header">
