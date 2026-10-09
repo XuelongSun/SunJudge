@@ -1,4 +1,10 @@
 .env
+.env.*
+!.env.example
+*.sql
+*.sql.gz
+*.tar.gz
+.uv-cache/
 .venv/
 __pycache__/
 .pytest_cache/
@@ -24,7 +30,40 @@ PRD.md
 README-ScoreManagerCLI.md
 tutorial.md
 test.md
+learning_course.md
+learning_notes.md
+re-implement.md
+typescript_tutorial.md
+vue_tutorial.md
+
+# Local deployment/release guidance (keep runnable deploy/ configuration).
+/docs/DEPLOYMENT.md
+/docs/CLOUD_AND_DOMAIN.md
+/docs/RELEASE_CHECKLIST.md
 
 *.xlsx
 
 test_cases/
+templates/
+
+# Local test reports, coverage and browser-run artifacts (keep test source files).
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Upload data, SQLite sidecars and local editor/OS temporary files.
+uploads/
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.tmp
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

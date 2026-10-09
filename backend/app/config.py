@@ -3,11 +3,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR / ".env", override=False)
 
 
 class Config:
+    PRODUCTION = os.getenv("SUNJUDGE_ENV", "development") == "production"
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-change-me")
     SQLALCHEMY_DATABASE_URI = os.getenv(
         "DATABASE_URL",
@@ -17,6 +21,9 @@ class Config:
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = "Lax"
+    SESSION_COOKIE_SECURE = PRODUCTION
+    TRUSTED_ORIGINS = [origin.strip() for origin in os.getenv("TRUSTED_ORIGINS", "").split(",") if origin.strip()]
+    GRADING_QUEUE_ENABLED = os.getenv("GRADING_QUEUE_ENABLED", "true").lower() in {"1", "true", "yes"}
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", str(BASE_DIR / "instance" / "uploads"))
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(64 * 1024 * 1024)))
     JUDGE_DOCKER_IMAGE = os.getenv("JUDGE_DOCKER_IMAGE", "python:3.11-slim")
@@ -24,6 +31,7 @@ class Config:
     JUDGE_DOCKER_HOST_TIMEOUT_BUFFER = int(os.getenv("JUDGE_DOCKER_HOST_TIMEOUT_BUFFER", "30"))
     GRADING_QUEUE_INLINE = os.getenv("GRADING_QUEUE_INLINE", "false").lower() in {"1", "true", "yes"}
     LLM_GRADING_TIMEOUT = int(os.getenv("LLM_GRADING_TIMEOUT", "60"))
+    LLM_ENCRYPTION_KEY = os.getenv("LLM_ENCRYPTION_KEY", "")
 
 
 class TestingConfig(Config):

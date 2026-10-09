@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models import Assignment, AssignmentGrade, ClassRoster, GradingResult, Submission
 from .accounts import StudentIdError, short_student_no
+from .student_assignment_state import student_deadline_state
 
 
 FINAL_GRADE_STATUSES = {GradingResult.STATUS_REVIEWED, GradingResult.STATUS_PUBLISHED}
@@ -143,7 +144,7 @@ def _build_grade_row(assignment: Assignment, roster_entry: ClassRoster) -> dict[
             assignment.latest_submissions_for(roster_entry.matched_user_id),
             key=lambda submission: (submission.submitted_at, submission.id),
         )
-    requirements = assignment.submission_requirements_json or []
+    requirements = assignment.submission_requirements_json or assignment.to_dict()["submission_requirements"]
     required_keys = {str(item.get("key")) for item in requirements if item.get("required", True)}
     submitted_keys = {
         submission.submission_item_key
@@ -158,7 +159,7 @@ def _build_grade_row(assignment: Assignment, roster_entry: ClassRoster) -> dict[
     else:
         student_state = "missing"
 
-    submitted_at = _completed_submission_time(latest_submissions, required_keys)
+    submitted_at = _completed_submission_time(latest_submissions, required_keys) if student_state == "submitted" else None
     grade = (
         AssignmentGrade.query.filter_by(assignment_id=assignment.id, student_user_id=roster_entry.matched_user_id).first()
         if roster_entry.matched_user_id
@@ -168,6 +169,7 @@ def _build_grade_row(assignment: Assignment, roster_entry: ClassRoster) -> dict[
         "roster": roster_entry.to_dict(),
         "student_user_id": roster_entry.matched_user_id,
         "student_state": student_state,
+        "is_expired": student_deadline_state(assignment, roster_entry.matched_user_id, grade, requirements)["is_expired"],
         "submitted_at": submitted_at.isoformat() if submitted_at else None,
         "submit_days_after_publish": _days_between(assignment.published_at, submitted_at),
         "submit_days_before_deadline": _days_between(submitted_at, assignment.deadline),
@@ -181,11 +183,12 @@ def _summarize_rows(assignment: Assignment, rows: list[dict[str, Any]]) -> dict[
     final_scores = [
         float(row["assignment_grade"]["final_score"])
         for row in rows
-        if _has_exportable_final_score(row.get("assignment_grade"))
+        if not row.get("is_expired") and _has_exportable_final_score(row.get("assignment_grade"))
     ]
     submit_after_publish = [row["submit_days_after_publish"] for row in rows if row["submit_days_after_publish"] is not None]
     submit_before_deadline = [row["submit_days_before_deadline"] for row in rows if row["submit_days_before_deadline"] is not None]
     submitted_count = len([row for row in rows if row["student_state"] == "submitted"])
+    expired_count = sum(1 for row in rows if row.get("is_expired") and row["student_state"] != "submitted")
     published_count = len(
         [
             row
@@ -197,12 +200,17 @@ def _summarize_rows(assignment: Assignment, rows: list[dict[str, Any]]) -> dict[
         "expected_count": len(rows),
         "submitted_count": submitted_count,
         "missing_count": max(len(rows) - submitted_count, 0),
+        "expired_count": expired_count,
+        "pending_submission_count": max(len(rows) - submitted_count - expired_count, 0),
         "submitted_rate": _round_optional(submitted_count / len(rows) if rows else None),
         "reviewed_or_published_count": len(final_scores),
         "published_count": published_count,
+        "reviewed_count": sum(1 for row in rows if row.get("assignment_grade") and row["assignment_grade"].get("status") == GradingResult.STATUS_REVIEWED),
+        "pending_grading_count": sum(1 for row in rows if row["student_state"] == "submitted" and not _has_exportable_final_score(row.get("assignment_grade"))),
         "average_score": _average(final_scores),
         "average_submit_days_after_publish": _average(submit_after_publish),
         "average_submit_days_before_deadline": _average(submit_before_deadline),
+        "publish_to_deadline_days": _days_between(assignment.published_at, assignment.deadline),
         "max_score": assignment.max_score,
     }
 

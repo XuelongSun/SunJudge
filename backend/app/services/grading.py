@@ -24,7 +24,8 @@ def run_auto_grading_for_student(assignment: Assignment, student_user_id: int) -
     llm_details: dict[str, object] = {"modules": []}
     evaluated_keys: set[str] = set()
 
-    program_modules = _group_modules_by_input_file(assignment.program_evaluations_json or [], default_key="main")
+    required_keys = {item["key"] for item in (assignment.submission_requirements_json or assignment.to_dict()["submission_requirements"]) if item.get("required", True)}
+    program_modules = {key: value for key, value in _group_modules_by_input_file(assignment.program_evaluations_json or [], default_key="main").items() if key in required_keys}
     for item_key, modules in program_modules.items():
         evaluated_keys.add(item_key)
         submission = _latest_confirmed_submission_for(assignment, student_user_id, item_key)
@@ -36,7 +37,7 @@ def run_auto_grading_for_student(assignment: Assignment, student_user_id: int) -
         program_score += judge_run.score
         feedback_parts.append(_judge_feedback(judge_run))
 
-    ai_modules = _group_modules_by_input_file(assignment.ai_evaluations_json or [], default_key="main")
+    ai_modules = {key: value for key, value in _group_modules_by_input_file(assignment.ai_evaluations_json or [], default_key="main").items() if key in required_keys}
     for item_key, modules in ai_modules.items():
         evaluated_keys.add(item_key)
         submission = _latest_confirmed_submission_for(assignment, student_user_id, item_key)
@@ -56,7 +57,7 @@ def run_auto_grading_for_student(assignment: Assignment, student_user_id: int) -
     manual_keys = [
         str(item.get("key"))
         for item in assignment.submission_requirements_json or []
-        if str(item.get("key")) and str(item.get("key")) not in evaluated_keys
+        if item.get("required", True) and str(item.get("key")) and str(item.get("key")) not in evaluated_keys
     ]
     if manual_keys:
         feedback_parts.append(f"Manual review required for: {', '.join(manual_keys)}.")

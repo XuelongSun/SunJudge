@@ -271,6 +271,39 @@ def list_roster(class_id: int):
     return jsonify({"class": course_class.to_admin_dict(), "roster": [entry.to_dict() for entry in roster]})
 
 
+@admin_bp.post("/classes/<int:class_id>/roster/batch")
+@login_required
+@roles_required(User.ROLE_TEACHER)
+def batch_roster_entries(class_id: int):
+    if not _get_managed_class_or_404(class_id):
+        return jsonify({"message": "教学班不存在或无权访问。"}), HTTPStatus.NOT_FOUND
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get("entry_ids")
+    action = payload.get("action")
+    if not isinstance(ids, list) or not ids or any(type(value) is not int for value in ids) or len(ids) != len(set(ids)):
+        return jsonify({"message": "请选择有效且不重复的学生名单项。"}), HTTPStatus.BAD_REQUEST
+    if action not in {"update_class", "delete"}:
+        return jsonify({"message": "不支持的批量操作。"}), HTTPStatus.BAD_REQUEST
+    entries = ClassRoster.query.filter(ClassRoster.class_id == class_id, ClassRoster.id.in_(ids)).all()
+    if len(entries) != len(ids):
+        return jsonify({"message": "名单项不存在或不属于当前教学班。"}), HTTPStatus.NOT_FOUND
+    if any(entry.matched_user_id for entry in entries):
+        return jsonify({"message": "已注册绑定账号的学生名单受保护，不能批量修改或删除。"}), HTTPStatus.CONFLICT
+    source_class = payload.get("source_class")
+    if action == "update_class" and (not isinstance(source_class, str) or not source_class.strip() or len(source_class.strip()) > 120):
+        return jsonify({"message": "学生信息班级不能为空且不能超过120字。"}), HTTPStatus.BAD_REQUEST
+    for entry in entries:
+        if action == "delete":
+            db.session.delete(entry)
+        else:
+            entry.source_class = source_class.strip()
+    db.session.add(AuditLog(actor_id=current_user.id, action="class_roster_batch_" + action,
+                            target_type="class", target_id=class_id,
+                            payload_json={"entry_ids": ids, "source_class": source_class if action == "update_class" else None}))
+    db.session.commit()
+    return jsonify({"affected_count": len(entries)})
+
+
 @admin_bp.post("/classes/<int:class_id>/roster")
 @login_required
 @roles_required(User.ROLE_TEACHER)

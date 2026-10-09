@@ -12,6 +12,12 @@ dependencies = [
     "flask-sqlalchemy>=3.1.1",
     "openpyxl>=3.1.5",
     "python-dotenv>=1.0.0",
+    "pymysql[rsa]>=1.1.1",
+    "cryptography>=44.0.0",
+    "gunicorn>=23.0.0; sys_platform != 'win32'",
+    "pillow>=12.3.0",
+    "markdown-it-py>=4.2.0",
+    "pydantic>=2.12,<3",
 ]
 
 [dependency-groups]

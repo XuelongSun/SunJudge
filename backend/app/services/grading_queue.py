@@ -28,7 +28,7 @@ _app: Flask | None = None
 def init_grading_queue(app: Flask) -> None:
     global _app
     _app = app
-    if app.config.get("GRADING_QUEUE_INLINE"):
+    if app.config.get("GRADING_QUEUE_INLINE") or not app.config.get("GRADING_QUEUE_ENABLED", True):
         return
     _start_worker(app)
 

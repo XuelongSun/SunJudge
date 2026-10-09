@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import codecs
+import math
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -32,6 +34,7 @@ class FileValidationContext:
     student_no: str
     student_name: str
     assignment_code: str
+    course_alias: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,16 @@ def normalize_submission_requirements(raw_requirements: object, assignment_type:
                 "required": bool(item.get("required", True)),
             }
         )
+        if "weight_percent" in item:
+            try:
+                weight = float(item["weight_percent"])
+            except (ValueError, TypeError) as exc:
+                raise FileValidationError("提交项权重必须为数字。") from exc
+            if not math.isfinite(weight) or not 0 <= weight <= 100:
+                raise FileValidationError("提交项权重必须在0到100之间。")
+            if not item.get("required", True) and weight != 0:
+                raise FileValidationError("非必交项权重必须为0。")
+            normalized[-1]["weight_percent"] = weight
     return normalized
 
 
@@ -235,6 +248,7 @@ def render_filename_template(template: str, context: FileValidationContext, exte
         "student_id": context.student_id,
         "student_no": context.student_no,
         "assignment_code": context.assignment_code,
+        "course_alias": context.course_alias,
         "name": context.student_name,
         "extension": extension,
     }
@@ -263,13 +277,27 @@ def _basic_content_checks(stream: BinaryIO, extension: str) -> list[dict[str, ob
 
     checks: list[dict[str, object]] = []
     if extension in TEXT_EXTENSIONS:
-        checks.append(_check(b"\x00" not in sample, "Text submissions must not contain binary null bytes."))
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        has_null = False
+        valid_utf8 = True
+        stream.seek(0)
         try:
-            sample.decode("utf-8")
-        except UnicodeDecodeError:
-            checks.append(_check(False, "File content must be valid UTF-8 text."))
-        else:
-            checks.append(_check(True, "File content is valid UTF-8 text."))
+            while chunk := stream.read(65536):
+                has_null = has_null or b"\x00" in chunk
+                if valid_utf8:
+                    try:
+                        decoder.decode(chunk, final=False)
+                    except UnicodeDecodeError:
+                        valid_utf8 = False
+            if valid_utf8:
+                try:
+                    decoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    valid_utf8 = False
+        finally:
+            stream.seek(current)
+        checks.append(_check(not has_null, "Text submissions must not contain binary null bytes."))
+        checks.append(_check(valid_utf8, "File content is valid UTF-8 text." if valid_utf8 else "File content must be valid UTF-8 text."))
     elif extension in SIGNATURES:
         signatures = SIGNATURES[extension]
         checks.append(_check(any(sample.startswith(signature) for signature in signatures), f"File content must look like a valid {extension} file."))

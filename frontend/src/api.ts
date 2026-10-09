@@ -38,6 +38,9 @@ export interface PublicClass {
   completed_assignment_count?: number
   published_grade_count?: number
   average_score?: number | null
+  average_max_score?: number | null
+  score_rate?: number | null
+  expired_assignment_count?: number
 }
 
 export interface AdminClass extends PublicClass {
@@ -84,6 +87,7 @@ export interface FileRules {
 }
 
 export interface SubmissionRequirement extends FileRules {
+  weight_percent?: number
   key: string
   label: string
   required: boolean
@@ -207,6 +211,9 @@ export interface TeacherLLMConfig {
 }
 
 export interface Assignment {
+  is_expired?: boolean
+  display_score?: number | null
+  markdown_drafts?: Record<string, MarkdownDraftSummary>
   id: number
   course_id: number
   class_id: number
@@ -240,6 +247,10 @@ export interface Assignment {
 }
 
 export interface AssignmentGradeAnalysis {
+  expired_count: number
+  pending_submission_count: number
+  reviewed_count: number
+  pending_grading_count: number
   expected_count: number
   submitted_count: number
   missing_count: number
@@ -249,9 +260,11 @@ export interface AssignmentGradeAnalysis {
   average_score: number | null
   average_submit_days_after_publish: number | null
   average_submit_days_before_deadline: number | null
+  publish_to_deadline_days: number | null
   max_score: number
 }
 export interface AssignmentSubmissionRow {
+  is_expired?: boolean
   roster: RosterEntry
   submission: Submission | null
   submissions: Submission[]
@@ -286,6 +299,7 @@ export interface SubmissionPreview {
 }
 
 export interface AssignmentPayload {
+  markdown_document_id?: number
   title: string
   code: string
   type: AssignmentType
@@ -318,7 +332,30 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   return data as T
 }
 
+export interface MarkdownDraftSummary {
+  id: number
+  revision: number
+  has_content: boolean
+  pending_changes: boolean
+  updated_at: string
+}
+
+export interface MarkdownDocument extends MarkdownDraftSummary {
+  content: string
+  kind: 'description' | 'submission'
+  item_key: string
+}
+
 export const api = {
+  openMarkdownDocument: (payload: { class_id: number; assignment_id?: number; kind: 'description' | 'submission'; item_key?: string }) =>
+    request<{ document: MarkdownDocument }>('/api/markdown-documents', { method: 'POST', body: JSON.stringify(payload) }),
+  saveMarkdownDocument: (id: number, content: string, revision: number) =>
+    request<{ document: MarkdownDocument }>(`/api/markdown-documents/${id}`, { method: 'PUT', body: JSON.stringify({ content, revision }) }),
+  uploadMarkdownImage: (id: number, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<{ asset: { id: string; url: string; filename: string } }>(`/api/markdown-documents/${id}/images`, { method: 'POST', body })
+  },
   me: () => request<{ user: User | null }>('/api/auth/me'),
   register: (payload: RegisterPayload) =>
     request<{ user: User }>('/api/auth/register', {
@@ -368,6 +405,8 @@ export const api = {
     ),
   listRoster: (classId: number) =>
     request<{ class: AdminClass; roster: RosterEntry[] }>(`/api/admin/classes/${classId}/roster`),
+  batchRosterEntries: (classId: number, payload: { entry_ids: number[]; action: 'update_class' | 'delete'; source_class?: string }) =>
+    request<{ affected_count: number }>(`/api/admin/classes/${classId}/roster/batch`, { method: 'POST', body: JSON.stringify(payload) }),
   createRosterEntry: (classId: number, payload: { student_name: string; student_no: string; student_number?: string; source_class?: string }) =>
     request<{ entry: RosterEntry }>(`/api/admin/classes/${classId}/roster`, {
       method: 'POST',

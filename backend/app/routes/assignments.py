@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 import re
+import math
 import shlex
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from ..models import (
     CourseMember,
     GradingResult,
     JudgeRun,
+    MarkdownDocument,
     Submission,
     TeacherLLMConfig,
     User,
@@ -37,8 +39,13 @@ from ..services.file_validation import (
     validate_saved_submission_file,
     validate_submission_file,
 )
+from ..services.feedback_report import build_feedback_report
+from ..services.markdown_documents import bind_description_document, prepare_student_drafts, validate_document_images
 from ..services.grading_queue import enqueue_auto_grading
+from ..services.secrets import encrypt_api_key
 from ..services.score_export import build_assignment_grade_csv, build_assignment_gradebook, build_scoremanager_export
+from ..services.assignment_weights import validate_weights, validate_review_weights
+from ..services.student_assignment_state import student_deadline_state
 from .permissions import roles_required
 
 
@@ -131,6 +138,11 @@ def create_assignment(class_id: int):
         assignment.published_at = utc_now()
     db.session.add(assignment)
     db.session.flush()
+    try:
+        bind_description_document(assignment, payload, current_user)
+    except (FileValidationError, PermissionError) as exc:
+        db.session.rollback()
+        return jsonify(message=str(exc)), 403 if isinstance(exc, PermissionError) else 400
     db.session.add(
         AuditLog(
             actor_id=current_user.id,
@@ -171,6 +183,11 @@ def update_assignment(assignment_id: int):
     assignment, error = _apply_assignment_payload(assignment, payload, partial=True)
     if error:
         return jsonify({"message": error}), HTTPStatus.BAD_REQUEST
+    try:
+        bind_description_document(assignment, payload, current_user)
+    except (FileValidationError, PermissionError) as exc:
+        db.session.rollback()
+        return jsonify(message=str(exc)), 403 if isinstance(exc, PermissionError) else 400
     if assignment.code != old_code:
         duplicate = Assignment.query.filter(
             Assignment.class_id == assignment.class_id,
@@ -284,6 +301,7 @@ def list_assignment_submissions(assignment_id: int):
         else:
             student_state = "read" if read else "unread"
         teacher_state = _teacher_grading_state(assignment_grade, latest_submissions, assignment)
+        deadline_state = student_deadline_state(assignment, entry.matched_user_id, assignment_grade, requirements)
         rows.append(
             {
                 "roster": entry.to_dict(),
@@ -294,6 +312,7 @@ def list_assignment_submissions(assignment_id: int):
                 "state": "submitted" if student_state == "submitted" else "missing",
                 "student_state": student_state,
                 "teacher_state": teacher_state,
+                "is_expired": deadline_state["is_expired"],
                 "read_at": read.read_at.isoformat() if read else None,
             }
         )
@@ -388,6 +407,8 @@ def save_llm_config():
     base_url = str(payload.get("base_url") or "").strip()
     model = str(payload.get("model") or "").strip()
     api_key = str(payload.get("api_key") or "").strip()
+    if len(api_key.encode("utf-8")) > 200:
+        return jsonify({"message": "API key must be at most 200 UTF-8 bytes."}), HTTPStatus.BAD_REQUEST
     provider = str(payload.get("provider") or TeacherLLMConfig.PROVIDER_DEEPSEEK).strip() or TeacherLLMConfig.PROVIDER_DEEPSEEK
     enabled = bool(payload.get("enabled", True))
 
@@ -400,10 +421,10 @@ def save_llm_config():
     if not config:
         if not api_key:
             return jsonify({"message": "API key is required when creating LLM config."}), HTTPStatus.BAD_REQUEST
-        config = TeacherLLMConfig(teacher_id=current_user.id, encrypted_api_key=api_key)
+        config = TeacherLLMConfig(teacher_id=current_user.id, encrypted_api_key=encrypt_api_key(api_key))
         db.session.add(config)
     elif api_key:
-        config.encrypted_api_key = api_key
+        config.encrypted_api_key = encrypt_api_key(api_key)
 
     if not config.encrypted_api_key:
         return jsonify({"message": "API key is required."}), HTTPStatus.BAD_REQUEST
@@ -522,13 +543,20 @@ def review_submission_grade(submission_id: int):
     before = result.to_dict() if result.id else None
     try:
         file_reviews = _normalize_file_reviews(payload.get("file_reviews"))
+        file_reviews = validate_review_weights(submission.assignment, file_reviews)
+        for review in file_reviews:
+            target = db.session.get(Submission, review.get("submission_id"))
+            if not target or target.assignment_id != submission.assignment_id or target.student_user_id != submission.student_user_id or target.submission_item_key != review["submission_item_key"]:
+                raise ValueError("批改文件不属于当前学生和作业。")
     except ValueError as exc:
         return jsonify({"message": str(exc)}), HTTPStatus.BAD_REQUEST
     try:
         final_score = float(payload.get("final_score", sum(float(item["score"]) for item in file_reviews)))
     except (TypeError, ValueError):
         return jsonify({"message": "Final score must be a number."}), HTTPStatus.BAD_REQUEST
-    if final_score < 0 or final_score > submission.assignment.max_score:
+    if file_reviews:
+        final_score = round(sum(float(item["score"]) for item in file_reviews), 2)
+    if not math.isfinite(final_score) or final_score < 0 or final_score > submission.assignment.max_score:
         return jsonify({"message": f"Final score must be between 0 and {submission.assignment.max_score}."}), HTTPStatus.BAD_REQUEST
     status = str(payload.get("status") or GradingResult.STATUS_REVIEWED).strip()
     if status not in {GradingResult.STATUS_REVIEWED, GradingResult.STATUS_PUBLISHED}:
@@ -538,7 +566,7 @@ def review_submission_grade(submission_id: int):
     result.teacher_comment = str(payload.get("teacher_comment") or "").strip() or None
     report = str(payload.get("feedback") or "").strip()
     if not report and file_reviews:
-        report = _build_feedback_report(submission.assignment, submission.student, file_reviews, result.teacher_comment)
+        report = build_feedback_report(submission, file_reviews, result.teacher_comment, final_score)
     result.feedback = report or result.feedback or None
     result.reviewed_by = current_user.id
     result.status = status
@@ -647,6 +675,7 @@ def submit_assignment(assignment_id: int):
                 student_no=student_no,
                 student_name=roster_entry.student_name,
                 assignment_code=assignment.code,
+                course_alias=assignment.course_class.alias,
             ),
             check_content=False,
             filename_only=True,
@@ -668,6 +697,17 @@ def submit_assignment(assignment_id: int):
         validation_result_json=validation.to_dict(),
     )
     db.session.add(submission)
+    # An explicit file upload replaces this item's online draft as the next version.
+    document = MarkdownDocument.query.filter_by(assignment_id=assignment.id, owner_id=current_user.id,
+                                               kind="submission", item_key=item_key).first()
+    if document:
+        target = Path(current_app.config["UPLOAD_FOLDER"]) / relative_path
+        document.content = target.read_text(encoding="utf-8", errors="replace") if validation.extension == ".md" and validation.size <= 1024 * 1024 else ""
+        document.revision += 1
+        document.submitted_revision = document.revision
+        if validation.extension == ".md":
+            submission.validation_result_json = {**validation.to_dict(), "markdown_document_id": document.id,
+                                                 "markdown_revision": document.revision}
     db.session.add(
         AuditLog(
             actor_id=current_user.id,
@@ -710,17 +750,23 @@ def confirm_assignment_submission(assignment_id: int):
     latest_by_key = {submission.submission_item_key: submission for submission in latest_submissions}
     requirements_by_key = {str(item.get("key")): item for item in assignment.submission_requirements_json or []}
     required_keys = {key for key, item in requirements_by_key.items() if item.get("required", True)}
-    missing_keys = sorted(key for key in required_keys if key not in latest_by_key)
+    pending_drafts = MarkdownDocument.query.filter_by(assignment_id=assignment.id, owner_id=current_user.id, kind="submission").all()
+    draft_keys = {document.item_key for document in pending_drafts if document.revision > document.submitted_revision and document.content.strip()}
+    missing_keys = sorted(key for key in required_keys if key not in latest_by_key and key not in draft_keys)
     if missing_keys:
         return jsonify({"message": "Please upload all required files before confirming submission.", "missing_keys": missing_keys}), HTTPStatus.BAD_REQUEST
 
+    created_paths = []
     try:
+        prepare_student_drafts(assignment, current_user, requirements_by_key, created_paths)
+        latest_submissions = assignment.latest_submissions_for(current_user.id)
         student_no = roster_entry.student_no or short_student_no(roster_entry.student_id)
         validation_context = FileValidationContext(
             student_id=roster_entry.student_id,
             student_no=student_no,
             student_name=roster_entry.student_name,
             assignment_code=assignment.code,
+            course_alias=assignment.course_class.alias,
         )
         for submission in latest_submissions:
             requirement = requirements_by_key.get(submission.submission_item_key)
@@ -730,11 +776,25 @@ def confirm_assignment_submission(assignment_id: int):
             if error:
                 raise FileValidationError(error)
             validation = validate_saved_submission_file(target, submission.original_filename, requirement, validation_context)
-            submission.validation_result_json = validation.to_dict()
+            previous = submission.validation_result_json or {}
+            if previous.get("markdown_document_id"):
+                document = db.session.get(MarkdownDocument, previous["markdown_document_id"])
+                if not document or document.assignment_id != assignment.id or document.owner_id != current_user.id or document.item_key != submission.submission_item_key:
+                    raise FileValidationError("Markdown 文档归属不匹配。")
+                previous = {**previous, "markdown_asset_ids": validate_document_images(document, target.read_text(encoding="utf-8"))}
+            submission.validation_result_json = {**validation.to_dict(), **{key: value for key, value in previous.items() if key.startswith("markdown_")}}
             submission.file_size = validation.size
     except (FileValidationError, StudentIdError) as exc:
+        db.session.rollback()
+        for target in created_paths:
+            target.unlink(missing_ok=True)
         details = exc.details if isinstance(exc, FileValidationError) else [str(exc)]
         return jsonify({"message": str(exc), "details": details}), HTTPStatus.BAD_REQUEST
+    except Exception:
+        db.session.rollback()
+        for target in created_paths:
+            target.unlink(missing_ok=True)
+        raise
 
     cleanup = _clear_assignment_student_work(assignment, student_user_id=current_user.id, delete_submissions=False, delete_files=False)
     confirmed_status = Submission.STATUS_LATE if assignment.deadline and now > _as_utc(assignment.deadline) else Submission.STATUS_SUBMITTED
@@ -751,7 +811,13 @@ def confirm_assignment_submission(assignment_id: int):
             payload_json={"class_id": assignment.class_id, "submission_ids": [submission.id for submission in latest_submissions], **cleanup},
         )
     )
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        for target in created_paths:
+            target.unlink(missing_ok=True)
+        raise
     queue_status = enqueue_auto_grading(current_app._get_current_object(), assignment.id, current_user.id, reason="student_confirmed")
     assignment_grade = AssignmentGrade.query.filter_by(assignment_id=assignment.id, student_user_id=current_user.id).first()
     return jsonify(
@@ -817,6 +883,12 @@ def _clear_assignment_student_work(
         db.session.delete(grade)
 
     if delete_submissions:
+        document_query = MarkdownDocument.query.filter_by(assignment_id=assignment.id, kind="submission")
+        if student_user_id is not None:
+            document_query = document_query.filter_by(owner_id=student_user_id)
+        for document in document_query.all():
+            # A returned report can be confirmed again without retyping its body.
+            document.submitted_revision = -1
         for submission in submissions:
             if delete_files and _delete_submission_file(submission):
                 files_deleted += 1
@@ -896,7 +968,7 @@ def _manual_submission_keys(assignment: Assignment) -> set[str]:
     return {
         str(item.get("key"))
         for item in assignment.submission_requirements_json or []
-        if str(item.get("key")) and str(item.get("key")) not in evaluated
+        if item.get("required", True) and str(item.get("key")) and str(item.get("key")) not in evaluated
     }
 
 
@@ -916,6 +988,8 @@ def _normalize_file_reviews(raw_reviews: object) -> list[dict[str, object]]:
             max_score = float(raw_review.get("max_score", 0))
         except (TypeError, ValueError) as exc:
             raise ValueError("File review score, weight and max score must be numbers.") from exc
+        if not all(math.isfinite(value) for value in [score, weight_percent, max_score]):
+            raise ValueError("File review numbers must be finite.")
         if score < 0:
             raise ValueError("File review score cannot be negative.")
         if "weight_percent" in raw_review:
@@ -970,47 +1044,6 @@ def _sync_submission_grading_result(submission: Submission, grade: AssignmentGra
     db.session.add(result)
 
 
-def _build_feedback_report(
-    assignment: Assignment,
-    student: User | None,
-    file_reviews: list[dict[str, object]],
-    teacher_comment: str | None,
-) -> str:
-    lines = [
-        f"# {assignment.title} 批改反馈",
-        "",
-        f"- 学生：{student.student_name if student else '未知'}",
-        f"- 作业代码：{assignment.code}",
-        f"- 总分：{round(sum(float(item['score']) for item in file_reviews), 2)} / {assignment.max_score}",
-        "",
-        "## 文件评分",
-    ]
-    labels = {"manual": "教师手动批改", "program": "程序评测后复核", "ai": "AI 建议后复核"}
-    for index, item in enumerate(file_reviews, start=1):
-        label = str(item.get("submission_item_label") or f"文件 {index}")
-        filename = str(item.get("filename") or "-")
-        kind = labels.get(str(item.get("review_kind") or "manual"), str(item.get("review_kind") or "manual"))
-        weight = item.get("weight_percent") or 0
-        max_score = item.get("max_score") or 0
-        comment = str(item.get("comment") or "-").strip() or "-"
-        lines.extend(
-            [
-                "",
-                f"### {label}",
-                "",
-                f"- 文件：{filename}",
-                f"- 类型：{kind}",
-                f"- 权重：{weight}%",
-                f"- 得分：{item.get('score')} / {max_score}",
-                "",
-                "评语：",
-                "",
-                comment,
-            ]
-        )
-    lines.extend(["", "## 教师总评", "", teacher_comment or ""])
-    return "\n".join(lines).strip()
-
 def _apply_assignment_payload(assignment: Assignment, payload: dict[str, object], partial: bool = False) -> tuple[Assignment, str | None]:
     title = str(payload.get("title") or (assignment.title if partial else "")).strip()
     code = str(payload.get("code") or (assignment.code if partial else "")).strip()
@@ -1034,7 +1067,7 @@ def _apply_assignment_payload(assignment: Assignment, payload: dict[str, object]
         max_score = float(payload.get("max_score", assignment.max_score if partial else 100))
     except (TypeError, ValueError):
         return assignment, "Max score must be a number."
-    if max_score <= 0:
+    if not math.isfinite(max_score) or max_score <= 0:
         return assignment, "Max score must be greater than 0."
 
     try:
@@ -1083,6 +1116,7 @@ def _apply_assignment_payload(assignment: Assignment, payload: dict[str, object]
         total_percent = _evaluation_total_percent(program_evaluations, ai_evaluations)
         if total_percent > 100:
             return assignment, "Total evaluation score percent cannot exceed 100."
+        validate_weights(submission_requirements, program_evaluations, ai_evaluations)
         assignment.program_evaluations_json = program_evaluations
         assignment.ai_evaluations_json = ai_evaluations
     except ValueError as exc:
@@ -1139,7 +1173,7 @@ def _normalize_evaluations(
                 score_percent = float(item.get("score_percent", item.get("score", 0)))
             except (TypeError, ValueError) as exc:
                 raise ValueError("Evaluation score percent must be a number.") from exc
-            if score_percent <= 0:
+            if not math.isfinite(score_percent) or score_percent <= 0:
                 raise ValueError("Evaluation score percent must be greater than 0.")
             normalized.append(
                 {
@@ -1202,13 +1236,13 @@ def _normalize_program_cases(module: dict[str, object], module_name: str) -> lis
             score_percent = float(raw_case.get("score_percent", raw_case.get("score", 0)))
         except (TypeError, ValueError) as exc:
             raise ValueError("Program test case score percent must be a number.") from exc
-        if score_percent <= 0:
+        if not math.isfinite(score_percent) or score_percent <= 0:
             raise ValueError("Program test case score percent must be greater than 0.")
         try:
             timeout_seconds = float(raw_case.get("timeout_seconds") or 2)
         except (TypeError, ValueError) as exc:
             raise ValueError("Program test case timeout must be a number.") from exc
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("Program test case timeout must be greater than 0.")
         normalized.append(
             {

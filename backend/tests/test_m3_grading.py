@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
+from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from app.extensions import db
-from app.models import Assignment, ClassRoster, Course, CourseClass, CourseMember, GradingResult, JudgeRun, TeacherLLMConfig, User
+from app.models import Assignment, AssignmentGrade, ClassRoster, Course, CourseClass, CourseMember, GradingResult, JudgeRun, Submission, TeacherLLMConfig, User
 from app.services import judge, llm_grading
 
 
@@ -329,7 +333,7 @@ def test_student_read_status_and_published_feedback_lock_resubmission(client, mo
                     "comment": "Accepted after review.",
                 }
             ],
-            "teacher_comment": "Well done.",
+            "teacher_comment": "## 建议 :smile: ✅\n\n- **补充分析**\n\n```python\nprint(3)\n```",
             "reason": "Publish feedback",
             "status": "published",
         },
@@ -338,9 +342,14 @@ def test_student_read_status_and_published_feedback_lock_resubmission(client, mo
     grading = publish_response.get_json()["assignment_grade"]
     assert grading["final_score"] == 92
     assert grading["status"] == GradingResult.STATUS_PUBLISHED
-    assert "# Python Judge 批改反馈" in grading["feedback"]
-    assert "| 文件 |" not in grading["feedback"]
-    assert "### 提交文件" in grading["feedback"]
+    assert "|姓名|学号|作业代码|提交时间|截止时间|得分|" in grading["feedback"]
+    assert "|Alice|32300000006|py1|" in grading["feedback"]
+    assert "|文件|提交文件|权重|得分/满分|备注|" in grading["feedback"]
+    assert "|提交文件|` OS202601-06_py1.py `|" in grading["feedback"]
+    assert "---\n\n## 建议 :smile: ✅" in grading["feedback"]
+    assert "**评语：**" not in grading["feedback"]
+    assert "- **补充分析**\n\n```python\nprint(3)\n```" in grading["feedback"]
+    assert "Operating Systems - teacher1 - " in grading["feedback"]
 
     rows_after_save = client.get(f"/api/admin/assignments/{assignment_id}/submissions").get_json()["submissions"]
     saved_reviews = rows_after_save[0]["assignment_grade"]["llm_details"]["file_reviews"]
@@ -353,7 +362,7 @@ def test_student_read_status_and_published_feedback_lock_resubmission(client, mo
     _login(client, "OS202601-06")
     assignments = client.get(f"/api/classes/{class_id}/assignments").get_json()["assignments"]
     assert assignments[0]["assignment_grade"]["final_score"] == 92
-    assert assignments[0]["assignment_grade"]["feedback"]
+    assert assignments[0]["assignment_grade"]["feedback"] == grading["feedback"]
     locked_response = client.post(
         f"/api/assignments/{assignment_id}/submissions",
         data={"file": (BytesIO(b"print(3)\n"), "OS202601-06_py1.py")},
@@ -576,7 +585,9 @@ def test_confirmed_markdown_submission_runs_configured_llm_grading(client, monke
             return False
 
         def read(self):
-            return b'{"choices":[{"message":{"content":"{\\"score\\":36,\\"summary\\":\\"Report is clear.\\",\\"criteria_results\\":[{\\"content\\":\\"clarity\\",\\"weight\\":100,\\"score\\":36,\\"comment\\":\\"clear\\"}]}"}}]}'
+            result = {"total_score": 39, "summary": "Report is clear.",
+                      "criteria_results": [{"criterion_id": 1, "score": 36, "reason": "clear"}]}
+            return json.dumps({"choices": [{"message": {"content": json.dumps(result)}}]}).encode()
 
     captured = {}
 
@@ -584,6 +595,7 @@ def test_confirmed_markdown_submission_runs_configured_llm_grading(client, monke
         captured["url"] = request.full_url
         captured["authorization"] = request.headers.get("Authorization")
         captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data)
         return FakeResponse()
 
     monkeypatch.setattr(llm_grading, "urlopen", fake_urlopen)
@@ -655,6 +667,12 @@ def test_confirmed_markdown_submission_runs_configured_llm_grading(client, monke
     assert module["status"] == "completed"
     assert module["score"] == 36
     assert module["criteria_results"][0]["comment"] == "clear"
+    assert module["criteria_results"][0]["max_score"] == 40
+    assert module["model_total_score"] == 39
+    assert module["prompt_version"] == "rubric-v2"
+    assert module["schema_version"] == 1
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+    assert "criterion_id" in captured["payload"]["messages"][1]["content"]
 
 
 def test_teacher_llm_config_does_not_echo_api_key(client):
@@ -676,3 +694,117 @@ def test_teacher_llm_config_does_not_echo_api_key(client):
     config = response.get_json()["config"]
     assert config["has_api_key"] is True
     assert "secret-key" not in str(config)
+
+@pytest.mark.parametrize('scenario,expired,score', [
+    ('unsubmitted', True, 0), ('uploaded', True, 0), ('partial', True, 0),
+    ('confirmed', False, None), ('replacement', False, None),
+    ('late_allowed', False, None), ('future', False, None), ('no_deadline', False, None),
+    ('published', False, 88),
+])
+def test_student_deadline_presentation_preserves_submissions_and_grades(client, scenario, expired, score):
+    class_id = _create_class_with_student(client.application)
+    with client.application.app_context():
+        course_class = db.session.get(CourseClass, class_id)
+        student = User.query.filter_by(username='OS202601-06').first()
+        now = datetime.now(UTC)
+        assignment = Assignment(course_id=course_class.course_id, class_id=class_id, title='Deadline', code='due1',
+                                status=Assignment.STATUS_PUBLISHED, max_score=100,
+                                deadline=None if scenario == 'no_deadline' else now + timedelta(days=1 if scenario == 'future' else -1),
+                                allow_late=scenario == 'late_allowed',
+                                submission_requirements_json=[
+                                    {'key': key, 'label': key, 'allowed_extensions': ['.md'], 'required': True,
+                                     'max_size_mb': 1, 'filename_template': '{student_id}_{assignment_code}{extension}'}
+                                    for key in ['a', 'b']])
+        db.session.add(assignment)
+        db.session.flush()
+        if scenario in {'uploaded', 'partial', 'confirmed', 'replacement'}:
+            for key in ['a', 'b']:
+                status = 'uploaded' if scenario == 'uploaded' or (scenario == 'partial' and key == 'b') else 'submitted'
+                db.session.add(Submission(assignment_id=assignment.id, student_user_id=student.id,
+                                          submission_item_key=key, original_filename=f'{key}.md', file_path=f'test/{key}.md',
+                                          file_size=10, status=status, submitted_at=now - timedelta(days=2)))
+            if scenario == 'replacement':
+                db.session.add(Submission(assignment_id=assignment.id, student_user_id=student.id,
+                                          submission_item_key='a', original_filename='new.md', file_path='test/new.md',
+                                          file_size=10, status='uploaded', submitted_at=now))
+        if scenario == 'published':
+            db.session.add(AssignmentGrade(assignment_id=assignment.id, student_user_id=student.id,
+                                           status=GradingResult.STATUS_PUBLISHED, final_score=88))
+        db.session.commit()
+        assignment_id = assignment.id
+        grade_count = AssignmentGrade.query.count()
+        assert 'is_expired' not in assignment.to_dict(), 'teacher payload and grades must not be rewritten'
+        if scenario == 'unsubmitted':
+            from app.services.student_assignment_state import student_deadline_state
+            assert not student_deadline_state(assignment, student.id, None, assignment.submission_requirements_json,
+                                              now=assignment.deadline)['is_expired']
+            assert student_deadline_state(assignment, student.id, None, assignment.submission_requirements_json,
+                                          now=assignment.deadline + timedelta(microseconds=1))['is_expired']
+
+    _login(client, 'OS202601-06')
+    response = client.get(f'/api/classes/{class_id}/assignments')
+    assert response.status_code == 200
+    item = next(row for row in response.get_json()['assignments'] if row['id'] == assignment_id)
+    assert item['is_expired'] is expired
+    assert item['display_score'] == score
+    if scenario in {'unsubmitted', 'future'}:
+        client.post('/api/auth/logout')
+        _login(client, 'teacher1')
+        teacher_row = client.get(f'/api/admin/assignments/{assignment_id}/submissions').get_json()['submissions'][0]
+        assert teacher_row['is_expired'] is expired
+        assert teacher_row['student_state'] == 'unread'
+    with client.application.app_context():
+        assert AssignmentGrade.query.count() == grade_count
+        if scenario == 'published':
+            assert AssignmentGrade.query.one().final_score == 88
+
+def test_weighted_submission_configuration_and_optional_scores_are_authoritative(client):
+    class_id = _create_class_with_student(client.application)
+    _login(client, 'teacher1')
+    payload = _program_assignment_payload()
+    payload['program_evaluations'] = []
+    payload['submission_requirements'] = [
+        {'key': 'main', 'label': '报告', 'allowed_extensions': ['.md'], 'max_size_mb': 1,
+         'filename_template': '{student_id}_{assignment_code}{extension}', 'required': True, 'weight_percent': 100},
+        {'key': 'extra', 'label': '附件', 'allowed_extensions': ['.md'], 'max_size_mb': 1,
+         'filename_template': '{student_id}_{assignment_code}_extra{extension}', 'required': False, 'weight_percent': 0},
+    ]
+    mismatch = {**payload, 'ai_evaluations': [{'input_file_key': 'main', 'name': '检查', 'score_percent': 40,
+                                              'criteria_items': [{'content': '准确性', 'weight': 100}]}]}
+    rejected = client.post(f'/api/admin/classes/{class_id}/assignments', json=mismatch)
+    assert rejected.status_code == 400
+    created = client.post(f'/api/admin/classes/{class_id}/assignments', json=payload)
+    assert created.status_code == 201
+    assignment_id = created.get_json()['assignment']['id']
+    client.post('/api/auth/logout')
+    _login(client, 'OS202601-06')
+    submissions = []
+    for key, filename in [('main', 'OS202601-06_py1.md'), ('extra', 'OS202601-06_py1_extra.md')]:
+        upload = client.post(f'/api/assignments/{assignment_id}/submissions',
+                             data={'item_key': key, 'file': (BytesIO(b'# Report\nContent'), filename)},
+                             content_type='multipart/form-data')
+        assert upload.status_code == 201
+        submissions.append(upload.get_json()['submission'])
+    assert _confirm_assignment(client, assignment_id).status_code == 200
+    client.post('/api/auth/logout')
+    _login(client, 'teacher1')
+    reviews = [{'submission_id': item['id'], 'submission_item_key': item['submission_item_key'], 'score': score,
+                'weight_percent': weight, 'max_score': maximum, 'review_status': 'confirmed'}
+               for item, score, weight, maximum in [(submissions[0], 80, 100, 999), (submissions[1], 50, 0, 999)]]
+    pending = client.get(f'/api/admin/assignments/{assignment_id}/submissions').get_json()['analysis']
+    assert pending['pending_grading_count'] == 1
+    assert pending['reviewed_count'] == 0
+    reviewed = client.patch(f'/api/admin/submissions/{submissions[0]["id"]}/grade',
+                            json={'file_reviews': reviews, 'final_score': 100, 'status': 'reviewed'})
+    assert reviewed.status_code == 200
+    grade = reviewed.get_json()['assignment_grade']
+    assert grade['final_score'] == 80
+    assert [item['max_score'] for item in grade['llm_details']['file_reviews']] == [100, 0]
+    assert grade['llm_details']['file_reviews'][1]['score'] == 0
+    overview = client.get(f'/api/admin/assignments/{assignment_id}/submissions').get_json()
+    assert overview['analysis']['reviewed_count'] == 1
+    assert overview['analysis']['published_count'] == 0
+    assert overview['analysis']['pending_grading_count'] == 0
+    reviews[0]['score'] = 101
+    excessive = client.patch(f'/api/admin/submissions/{submissions[0]["id"]}/grade', json={'file_reviews': reviews})
+    assert excessive.status_code == 400

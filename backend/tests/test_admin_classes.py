@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from test_roster_import import exported_roster, legacy_roster_export
 
 from app.extensions import db
 from app.models import ClassRoster, CourseClass, User
@@ -40,6 +40,52 @@ def test_teacher_can_create_class_with_roster(client, admin):
         assert ClassRoster.query.filter_by(student_id="OS2026-32").first() is not None
 
 
+def test_teacher_imports_teaching_export_with_stale_dimension(client):
+    login_approved_teacher(client)
+    class_id = client.post('/api/admin/classes', json={"class": {"alias": "IMPORT26"}}).json["class"]["id"]
+    response = client.post('/api/admin/classes/import-excel', data={"class_id": str(class_id), "file": (exported_roster(wrong_dimension=True), "jsdmcdy.xlsx")})
+    assert response.status_code == 201
+    assert response.json["imported_count"] == 1
+    entry = client.get(f'/api/admin/classes/{class_id}/roster').json["roster"][0]
+    assert entry["student_number"] == "00001234"
+
+
+def test_batch_roster_update_delete_and_protection_are_atomic(client):
+    login_approved_teacher(client)
+    class_id = client.post('/api/admin/classes', json={"class": {"alias": "BATCH26"}, "roster": [
+        {"student_name": name, "student_no": str(index), "source_class": "原班级"}
+        for index, name in enumerate(["Alice", "Bob", "Carol"], 1)]}).json["class"]["id"]
+    entries = client.get(f'/api/admin/classes/{class_id}/roster').json["roster"]
+    ids = [entry["id"] for entry in entries]
+    url = f'/api/admin/classes/{class_id}/roster/batch'
+    assert client.post(url, json={"entry_ids": ids[:2], "action": "update_class", "source_class": " 新班级 "}).json["affected_count"] == 2
+    with client.application.app_context():
+        assert db.session.get(ClassRoster, ids[0]).source_class == "新班级"
+        db.session.get(ClassRoster, ids[2]).matched_user_id = User.query.filter_by(username="teacher1").first().id
+        db.session.commit()
+    assert client.post(url, json={"entry_ids": [ids[0], ids[2]], "action": "delete"}).status_code == 409
+    assert client.post(url, json={"entry_ids": [ids[0], 99999], "action": "update_class", "source_class": "错误修改"}).status_code == 404
+    assert client.post(url, json={"entry_ids": [ids[0], ids[0]], "action": "delete"}).status_code == 400
+    assert client.post(url, json={"entry_ids": [True], "action": "delete"}).status_code == 400
+    assert client.post(url, json={"entry_ids": [ids[0]], "action": "update_class", "source_class": " "}).status_code == 400
+    assert client.post(url, json={"entry_ids": ids[:2], "action": "delete"}).json["affected_count"] == 2
+    remaining = client.get(f'/api/admin/classes/{class_id}/roster').json["roster"]
+    assert [entry["id"] for entry in remaining] == [ids[2]]
+
+
+def test_batch_roster_requires_class_owner(client):
+    login_approved_teacher(client)
+    class_id = client.post('/api/admin/classes', json={"class": {"alias": "OWN26"}}).json["class"]["id"]
+    with client.application.app_context():
+        teacher = User(username="teacher2", role=User.ROLE_TEACHER, teacher_status=User.TEACHER_STATUS_APPROVED)
+        teacher.set_password("secret123")
+        db.session.add(teacher)
+        db.session.commit()
+    client.post('/api/auth/logout')
+    client.post('/api/auth/login', json={"username": "teacher2", "password": "secret123"})
+    assert client.post(f'/api/admin/classes/{class_id}/roster/batch', json={"entry_ids": [1], "action": "delete"}).status_code == 404
+
+
 def test_admin_can_view_existing_classes(client, admin):
     login_approved_teacher(client)
     client.post(
@@ -64,8 +110,7 @@ def test_teacher_can_import_students_xlsx(client, admin):
     )
     class_id = create_class.get_json()["class"]["id"]
 
-    fixture = Path(__file__).resolve().parents[2] / "students.xlsx"
-    with fixture.open("rb") as file:
+    with legacy_roster_export() as file:
         response = client.post(
             "/api/admin/classes/import-excel",
             data={

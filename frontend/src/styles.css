@@ -259,7 +259,7 @@ p {
   gap: 4px;
 }
 
-.drawer-toolbar span {
+.drawer-toolbar > div:first-child > span:not(.el-tag) {
   color: var(--muted);
   font-size: 13px;
 }
@@ -281,6 +281,23 @@ p {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.student-assignment-cards {
+  min-width: 0;
+}
+
+.student-assignment-overview.workflow-card {
+  margin-top: 0;
+}
+
+.student-assignment-overview .student-state-grid,
+.student-assignment-overview .student-summary-grid {
+  margin-bottom: 0;
+}
+
+.student-assignment-cards .student-assignment-description {
+  background: var(--panel-bg);
+}
+
 .student-state-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -298,7 +315,7 @@ p {
   background: var(--panel-subtle);
 }
 
-.student-state-grid span {
+.student-state-grid > div > span:not(.el-tag) {
   color: var(--muted);
   font-size: 12px;
 }
@@ -337,12 +354,91 @@ p {
   border-top: 1px solid var(--border);
 }
 
+.assignment-submission-panel {
+  margin-top: 32px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-top: 4px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.assignment-submission-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent);
+}
+
+.assignment-submission-panel .assignment-confirm-bar {
+  background: var(--panel-bg);
+}
+
 .assignment-rendered {
   min-height: 40px;
   max-width: 100%;
   color: var(--text);
   line-height: 1.65;
   overflow-wrap: anywhere;
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", Arial, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+
+.assignment-rendered img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: var(--radius);
+}
+
+.online-markdown-editor {
+  --markdown-pane-height: max(420px, 62vh);
+  margin: 16px 0;
+}
+
+.markdown-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.markdown-editor-toolbar > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.markdown-editor-buttons {
+  flex-wrap: wrap;
+}
+
+.markdown-editor-toolbar > .markdown-save-error {
+  color: var(--el-color-danger);
+}
+
+.markdown-source-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.markdown-source-panel textarea {
+  width: 100%;
+  min-height: 420px;
+  padding: 14px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+  color: var(--text);
+  font: 14px/1.65 "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+}
+
+.markdown-source-panel textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .assignment-rendered h1,
@@ -400,6 +496,34 @@ p {
   font-weight: 700;
 }
 
+.markdown-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.assignment-rendered .feedback-file-table {
+  display: table;
+  min-width: 640px;
+  table-layout: fixed;
+}
+
+.feedback-file-table th,
+.feedback-file-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.feedback-file-table th:nth-child(1) { width: 18%; }
+.feedback-file-table th:nth-child(2) { width: 30%; }
+.feedback-file-table th:nth-child(3) { width: 10%; }
+.feedback-file-table th:nth-child(4) { width: 14%; }
+.feedback-file-table th:nth-child(5) { width: 28%; }
+
+.feedback-file-table code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .assignment-rules {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -415,8 +539,8 @@ p {
   background: var(--panel-subtle);
 }
 
-.assignment-rules span,
-.evaluation-editor span {
+.assignment-rules > div > span:not(.el-tag),
+.evaluation-editor > .drawer-toolbar > div > span:not(.el-tag) {
   color: var(--muted);
   font-size: 12px;
 }
@@ -456,7 +580,7 @@ p {
 
 .markdown-edit-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.05fr);
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   gap: 14px;
   align-items: stretch;
   margin-bottom: 16px;
@@ -490,11 +614,27 @@ p {
   overflow: auto;
 }
 
-.preview-title {
-  margin-bottom: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
+.markdown-source-panel textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.online-markdown-editor .markdown-source-panel,
+.online-markdown-editor .markdown-live-preview {
+  height: var(--markdown-pane-height);
+  min-height: 0;
+  max-height: none;
+}
+
+.online-markdown-editor .markdown-source-panel textarea {
+  height: 100%;
+  min-height: 0;
+  resize: none;
+  overflow: auto;
+}
+
+.student-markdown-dialog .online-markdown-editor {
+  --markdown-pane-height: max(560px, 65vh);
 }
 
 .submission-files {
@@ -513,7 +653,7 @@ p {
   font-size: 12px;
 }
 
-.submission-files span {
+.submission-files > div > span:not(.el-tag) {
   overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 12px;
@@ -571,7 +711,7 @@ p {
   min-width: 0;
 }
 
-.review-file-card span,
+.review-file-card > div > span:not(.el-tag),
 .muted-line {
   color: var(--muted);
   font-size: 13px;
@@ -593,7 +733,7 @@ p {
   background: var(--panel-bg);
 }
 
-.judge-run-summary span {
+.judge-run-summary > div > span:not(.el-tag) {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -608,7 +748,7 @@ p {
   gap: 10px;
 }
 
-.judge-case-detail span {
+.judge-case-detail > div > span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -683,7 +823,7 @@ p {
   background: var(--panel-subtle);
 }
 
-.submission-guide span {
+.submission-guide > div > span {
   color: var(--muted);
   font-size: 12px;
 }
@@ -730,8 +870,31 @@ p {
   transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
 }
 
-.el-button:hover {
+.el-button:not(:disabled):not(.is-loading):hover {
   transform: translateY(-1px);
+}
+
+.el-button.is-disabled {
+  --el-button-disabled-text-color: var(--muted);
+  --el-button-disabled-bg-color: var(--panel-subtle);
+  --el-button-disabled-border-color: var(--border);
+}
+
+.el-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.toolbar-actions > .el-button + .el-button,
+.el-dialog__footer > .el-button + .el-button {
+  margin-left: 0;
+}
+
+.el-dialog__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .el-table {
@@ -804,6 +967,14 @@ p {
     max-height: none;
   }
 
+  .student-markdown-dialog .el-dialog__body {
+    padding: 16px 16px 88px;
+  }
+
+  .student-markdown-dialog .online-markdown-editor {
+    --markdown-pane-height: max(480px, 60vh);
+  }
+
   .review-file-card,
   .judge-case-detail {
     grid-template-columns: 1fr;
@@ -838,7 +1009,7 @@ p {
   text-align: center;
 }
 
-.grade-review-sticky-header span,
+.grade-review-sticky-header > div > span:not(.el-tag),
 .review-section-title {
   color: var(--muted);
   font-size: 12px;
@@ -854,14 +1025,101 @@ p {
   white-space: nowrap;
 }
 
-.redesigned-review-editor {
+.workflow-card {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  margin-top: 28px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel-subtle);
+}
+
+.workflow-card > .card-header {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.structured-form-dialog .workflow-card {
+  margin-top: 18px;
+  padding: 16px;
+  gap: 14px;
+}
+
+.structured-form-dialog .workflow-card:first-child { margin-top: 0; }
+.structured-form-dialog .workflow-card h2 { font-size: 16px; }
+.structured-form-dialog .workflow-card .el-form-item { margin-bottom: 0; }
+.structured-form-dialog .evaluation-item { background: var(--panel-bg); }
+.structured-form-dialog .drawer-toolbar { margin-bottom: 0; }
+.filename-fields { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.filename-fields > .el-button + .el-button { margin-left: 0; }
+
+.review-files-section {
   margin-top: 0;
-  padding-top: 0;
-  border-top: 0;
+}
+
+.assignment-config-dialog .workflow-card:first-child {
+  margin-top: 0;
+}
+
+.assignment-config-dialog .workflow-card > .form-grid .el-form-item,
+.assignment-config-dialog .workflow-card > .el-form-item {
+  margin-bottom: 0;
+}
+
+.assignment-config-dialog .workflow-card > .el-empty {
+  padding: 12px 0;
+}
+
+.assignment-description-card .online-markdown-editor,
+.assignment-description-card .markdown-edit-grid {
+  margin: 0;
+}
+
+.assignment-description-card .online-markdown-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.assignment-description-card .markdown-live-preview {
+  background: var(--panel-bg);
 }
 
 .review-work-card {
   gap: 14px;
+  background: var(--panel-bg);
+}
+
+.review-work-card > .card-header h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.review-overall-panel .markdown-edit-grid {
+  margin: 0;
+}
+
+.review-overall-panel .el-form-item {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.review-overall-panel .el-form-item__content {
+  align-items: stretch;
+}
+
+.review-overall-panel .el-textarea__inner {
+  height: 100%;
+  min-height: 320px;
+  font-family: "Cascadia Code", Consolas, "Microsoft YaHei", monospace;
+  line-height: 1.65;
+}
+
+.review-overall-panel .markdown-live-preview {
+  min-height: 320px;
   background: var(--panel-bg);
 }
 
@@ -874,7 +1132,34 @@ p {
   background: var(--panel-subtle);
 }
 
+.ai-report-list .ai-report-item {
+  display: grid;
+  gap: 12px;
+  background: var(--panel-bg);
+}
+
+.ai-result-total {
+  display: flex;
+  justify-content: flex-end;
+  color: var(--accent);
+}
+
 @media (max-width: 860px) {
+  .workflow-card {
+    margin-top: 20px;
+    padding: 16px;
+  }
+
+  .workflow-card > .card-header,
+  .review-work-card > .card-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .review-files-section {
+    margin-top: 0;
+  }
+
   .grade-review-sticky-header {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -894,6 +1179,32 @@ p {
   margin-bottom: 14px;
 }
 
+.analysis-grid,
+.student-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.progress-card .el-progress { margin: 8px 0 4px; }
+.completion-progress { display: flex; height: 7px; overflow: hidden; margin: 8px 0 4px; border-radius: 100px; background: var(--el-fill-color-light); }
+.completion-progress > span { height: 100%; flex: 0 0 auto; }
+.completion-progress-done { background: var(--el-color-primary); }
+.completion-progress-expired { background: var(--el-color-danger); }
+.analysis-grid .progress-card > strong,
+.student-summary-grid .progress-card > strong { white-space: normal; overflow-wrap: anywhere; }
+.progress-card small { color: var(--muted); line-height: 1.5; }
+.student-summary-grid > .progress-card-accent {
+  border-color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+}
+.student-summary-grid > .progress-card-accent > strong { color: var(--el-color-warning); }
+.weight-score-hint { margin-left: 16px; font-weight: 700; color: var(--text); }
+.filename-template-field > .el-form-item__label { display: flex; flex-wrap: wrap; gap: 4px 12px; height: auto; line-height: 1.5; }
+.filename-preview-inline { font-weight: 700; overflow-wrap: anywhere; color: var(--text); }
+.roster-batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; padding: 12px; background: var(--panel-subtle); border-radius: var(--radius); }
+.roster-batch-toolbar small { color: var(--muted); }
+
+@media (min-width: 721px) and (max-width: 1200px) {
+  .analysis-grid, .student-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 .analysis-grid > div,
 .student-summary-grid > div {
   display: grid;
@@ -905,9 +1216,9 @@ p {
   background: var(--panel-subtle);
 }
 
-.analysis-grid span,
-.student-summary-grid span,
-.analysis-grid small {
+.analysis-grid > div > span:not(.el-tag),
+.student-summary-grid > div > span:not(.el-tag),
+.analysis-grid > div > small {
   color: var(--muted);
   font-size: 12px;
 }
@@ -920,6 +1231,8 @@ p {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.student-summary-grid .progress-card-number { align-content: center; }
+.student-summary-grid .progress-card-number > strong { font-size: 34px; line-height: 1.2; }
 .assignment-confirm-bar {
   display: flex;
   align-items: center;
@@ -938,12 +1251,17 @@ p {
   min-width: 0;
 }
 
-.assignment-confirm-bar span {
+.assignment-confirm-bar > div > span {
   color: var(--muted);
   font-size: 13px;
 }
 
 @media (max-width: 720px) {
+  .assignment-submission-panel {
+    margin-top: 24px;
+    padding: 16px;
+  }
+
   .analysis-grid,
   .student-summary-grid {
     grid-template-columns: 1fr;

@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 import re
+import unicodedata
+from zipfile import BadZipFile
+from xml.etree.ElementTree import ParseError
 from typing import BinaryIO
 
 from openpyxl import load_workbook
@@ -36,23 +39,44 @@ def parse_roster_workbook(file: BinaryIO) -> ImportedRoster:
     if not data:
         raise RosterImportError("学生名单文件不能为空。")
 
-    workbook = load_workbook(BytesIO(data), data_only=True, read_only=True)
-    sheet = workbook[workbook.sheetnames[0]]
+    try:
+        workbook = load_workbook(BytesIO(data), data_only=True, read_only=True)
+    except (BadZipFile, ParseError, KeyError, ValueError, OSError) as exc:
+        raise RosterImportError("无法读取 Excel 文件，请上传有效的 .xlsx 或 .xlsm 文件。") from exc
+    try:
+        return _parse_workbook(workbook)
+    finally:
+        workbook.close()
+
+
+def _header(value: str) -> str:
+    value = re.sub(r"\s+", "", unicodedata.normalize("NFKC", value)).lower().rstrip(".。:：")
+    return {"no": "序号", "编号": "序号", "学生学号": "学号", "学生姓名": "姓名", "学生班级": "班级", "行政班级": "班级"}.get(value, value)
+
+
+def _parse_workbook(workbook) -> ImportedRoster:
     header_row_index: int | None = None
     header_map: dict[str, int] = {}
     metadata_cells: list[str] = []
 
-    for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-        normalized = [_cell_to_text(value) for value in row]
-        metadata_cells.extend(value for value in normalized if value)
-        found_headers = {value for value in normalized if value in REQUIRED_HEADERS}
-        if REQUIRED_HEADERS.issubset(found_headers):
-            header_row_index = row_index
-            header_map = {value: index for index, value in enumerate(normalized) if value in REQUIRED_HEADERS}
+    for sheet in workbook.worksheets:
+        # Some teaching-system exports incorrectly advertise dimension A1.
+        # Stream the actual XML rows rather than trusting that cached range.
+        sheet.reset_dimensions()
+        metadata_cells = []
+        for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+            normalized = [_cell_to_text(value) for value in row]
+            metadata_cells.extend(value for value in normalized if value)
+            headers = [_header(value) for value in normalized]
+            if REQUIRED_HEADERS.issubset(set(headers)):
+                header_row_index = row_index
+                header_map = {value: index for index, value in enumerate(headers) if value in REQUIRED_HEADERS}
+                break
+        if header_row_index is not None:
             break
 
     if header_row_index is None:
-        raise RosterImportError("Excel 中未找到包含 学号、姓名、班级 的表头行。")
+        raise RosterImportError("Excel 中未找到包含 序号（No.）、学号、姓名、班级 的表头行。")
 
     students: list[ImportedStudent] = []
     seen_student_nos: set[str] = set()

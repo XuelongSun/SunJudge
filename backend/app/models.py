@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from flask_login import UserMixin
 from sqlalchemy import func, inspect
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -193,7 +194,7 @@ class Assignment(db.Model):
     title = db.Column(db.String(160), nullable=False)
     code = db.Column(db.String(80), nullable=False)
     type = db.Column(db.String(30), nullable=False, default=TYPE_HOMEWORK)
-    description = db.Column(db.Text, nullable=True)
+    description = db.Column(db.Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=True)
     description_format = db.Column(db.String(20), nullable=False, default=FORMAT_TEXT)
     deadline = db.Column(db.DateTime, nullable=True)
     allow_late = db.Column(db.Boolean, nullable=False, default=False)
@@ -253,13 +254,25 @@ class Assignment(db.Model):
             data["submission_count"] = len(submitted_user_ids)
             data["feedback_count"] = feedback_count
             data["latest_submission_count"] = len(self.submissions)
+        from .services.assignment_weights import effective_requirements
+        data["submission_requirements"] = effective_requirements(data["submission_requirements"], self.program_evaluations_json or [], self.ai_evaluations_json or [])
         if student_user_id is not None:
+            markdown_keys = {item["key"] for item in data["submission_requirements"] if ".md" in item["allowed_extensions"]}
+            data["markdown_drafts"] = {
+                document.item_key: document.summary()
+                for document in MarkdownDocument.query.filter_by(
+                    assignment_id=self.id, owner_id=student_user_id, kind="submission"
+                ).all()
+                if document.item_key in markdown_keys
+            }
             data["ai_evaluations"] = []
             latest = self.latest_submission_for(student_user_id)
             data["submission"] = latest.to_dict() if latest else None
             data["submissions"] = [submission.to_dict() for submission in self.latest_submissions_for(student_user_id)]
             assignment_grade = AssignmentGrade.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()
             data["assignment_grade"] = assignment_grade.to_public_dict() if assignment_grade else None
+            from .services.student_assignment_state import student_deadline_state
+            data.update(student_deadline_state(self, student_user_id, assignment_grade, data["submission_requirements"]))
             read = AssignmentRead.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()
             data["read_at"] = read.read_at.isoformat() if read else None
         return data
@@ -507,6 +520,45 @@ class AssignmentGrade(db.Model):
             data["feedback"] = None
             data["teacher_comment"] = None
         return data
+
+
+class MarkdownDocument(db.Model):
+    __tablename__ = "markdown_documents"
+
+    id = db.Column(db.Integer, primary_key=True)
+    owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    class_id = db.Column(db.Integer, db.ForeignKey("classes.id"), nullable=False)
+    assignment_id = db.Column(db.Integer, db.ForeignKey("assignments.id"), nullable=True)
+    kind = db.Column(db.String(20), nullable=False)
+    item_key = db.Column(db.String(40), nullable=False, default="")
+    content = db.Column(db.Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=False, default="")
+    revision = db.Column(db.Integer, nullable=False, default=0)
+    submitted_revision = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
+
+    assignment = db.relationship("Assignment", backref="markdown_documents")
+    assets = db.relationship("MarkdownAsset", backref="document", cascade="all, delete-orphan")
+    __table_args__ = (db.UniqueConstraint("assignment_id", "owner_id", "kind", "item_key", name="uq_markdown_document_scope"),)
+
+    def summary(self):
+        return {"id": self.id, "revision": self.revision, "has_content": bool(self.content.strip()),
+                "pending_changes": self.revision > self.submitted_revision, "updated_at": self.updated_at.isoformat()}
+
+    def to_dict(self):
+        return {**self.summary(), "content": self.content, "kind": self.kind, "item_key": self.item_key}
+
+
+class MarkdownAsset(db.Model):
+    __tablename__ = "markdown_assets"
+
+    id = db.Column(db.String(32), primary_key=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("markdown_documents.id"), nullable=False, index=True)
+    original_filename = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    mime_type = db.Column(db.String(40), nullable=False)
+    file_size = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
 
 
 class AuditLog(db.Model):

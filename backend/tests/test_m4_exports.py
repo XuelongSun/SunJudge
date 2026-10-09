@@ -113,10 +113,15 @@ def test_m4_teacher_grade_analysis_csv_scoremanager_and_student_summary(client):
     analysis = gradebook.get_json()["analysis"]
     assert analysis["expected_count"] == 1
     assert analysis["submitted_count"] == 1
+    assert analysis["pending_submission_count"] == 0
+    assert analysis["expired_count"] == 0
     assert analysis["published_count"] == 1
+    assert analysis["reviewed_count"] == 0
+    assert analysis["pending_grading_count"] == 0
     assert analysis["average_score"] == 92
     assert analysis["average_submit_days_after_publish"] is not None
     assert analysis["average_submit_days_before_deadline"] is not None
+    assert analysis["publish_to_deadline_days"] == 5
 
     csv_response = client.get(f"/api/admin/assignments/{assignment_id}/grades.csv")
     assert csv_response.status_code == 200
@@ -151,3 +156,32 @@ def test_m4_scoremanager_export_blocks_invalid_student_ids(client):
     response = client.get(f"/api/admin/assignments/{assignment_id}/scoremanager-commands?field=homework")
     assert response.status_code == 400
     assert response.get_json()["invalid_students"][0]["student_id"] == "OS202601"
+
+def test_teacher_completion_separates_expired_and_pending_students(client):
+    class_id = _create_class_with_student(client.application)
+    _login(client, 'teacher1')
+    payload = _manual_assignment_payload()
+    assignment_id = client.post(f'/api/admin/classes/{class_id}/assignments', json=payload).json['assignment']['id']
+    def analysis():
+        return client.get(f'/api/admin/assignments/{assignment_id}/submissions').json['analysis']
+    assert analysis()['pending_submission_count'] == 1
+    with client.application.app_context():
+        assignment = db.session.get(Assignment, assignment_id)
+        assignment.deadline = utc_now() - timedelta(days=1)
+        # An unregistered roster student also counts as expired after deadline.
+        db.session.add(ClassRoster(class_id=class_id, student_no='07', student_id='OS202601-07', student_name='Bob'))
+        db.session.commit()
+    expired = analysis()
+    assert expired['expected_count'] == 2
+    assert expired['submitted_count'] == 0
+    assert expired['expired_count'] == 2
+    assert expired['pending_submission_count'] == 0
+    assert expired['average_score'] is None  # Teacher average does not include expired zero.
+    with client.application.app_context():
+        assignment = db.session.get(Assignment, assignment_id)
+        assignment.allow_late = True
+        db.session.commit()
+    late = analysis()
+    assert late['expired_count'] == 0
+    assert late['pending_submission_count'] == 2
+    assert late['submitted_count'] + late['expired_count'] + late['pending_submission_count'] == late['expected_count']

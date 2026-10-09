@@ -1,53 +1,51 @@
 # SunJudge
 
-SunJudge 是一个 Flask + Vue 的教学型 Web 项目，用于课程作业、实验报告和 Python 编程题的提交、自动批改、教师复核与成绩导出。
+Flask + Vue 的教学作业平台，当前已完成 M1–M4：账号与审批、教学班/名单、作业多文件提交与确认、Docker Python 评测、DeepSeek 辅助评分、教师复核/发布、成绩统计及 CSV/ScoreManagerCLI 命令导出。正在进行 M5 稳定化和生产准备。
 
-## M1 范围（已完成）
+## 文档入口
 
-当前里程碑已实现项目脚手架与账号权限闭环：
+- [生产部署步骤](docs/DEPLOYMENT.md)：Ubuntu、MySQL、Nginx、Gunicorn、Supervisor、HTTPS、备份/恢复/更新。
+- [API 调用文档](docs/API.md)及[全部路由索引](docs/API_REFERENCE.md)。
+- [腾讯云选型及现有域名配置](docs/CLOUD_AND_DOMAIN.md)。
+- [收束记录与生产验收清单](docs/RELEASE_CHECKLIST.md)。
+- [测试记录](test.md)、[实现教程与限制](tutorial.md)、PRD.md、AGENTS.md。
 
-- Flask 后端，使用 uv 管理依赖。
-- SQLAlchemy 数据模型与 Alembic/Flask-Migrate 迁移。
-- Flask-Login 服务端 Session 登录态。
-- 学生基于班级名单注册、学生多登录名登录、教师申请、管理员审批、登录与退出。
-- 教师创建教学班、导入 Excel 名单、在线维护名单。
-- 管理员查看教师与教学班层级列表，但不创建教学班。
-- Vue 3 + Vite + TypeScript + Element Plus 前端。
+## 本地开发
 
-## 本地启动
-
-后端：
-
-```shell
+```bash
 cd backend
-uv sync
+uv sync --locked
 uv run flask --app app:create_app db upgrade
-uv run flask --app app:create_app create-admin admin admin123
+uv run flask --app app:create_app create-admin admin
 uv run flask --app app:create_app run --debug
 ```
 
-前端：
+create-admin 会隐藏输入密码。按需复制 backend/.env.example 为 backend/.env，使用绝对SQLite路径更容易确认实际数据库位置；不要提交配置和数据库。本地默认SQLite，生产使用MySQL。
 
-```shell
+```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-前端默认通过 Vite 代理访问 `http://127.0.0.1:5000/api`。
+前端通过 Vite 代理 /api 到 127.0.0.1:5000。生产构建用 npm run build，由 Nginx 提供 dist，不运行 Vite dev server。
 
-## M1 实现说明
+## 验证
 
-账号权限的核心逻辑放在后端统一处理。`routes` 只负责 HTTP 参数和响应，`models` 定义持久化结构，`services/accounts.py` 封装学生编号校验和短编号提取规则。
+```bash
+cd backend
+uv run pytest -q
+uv run python scripts/generate_api_reference.py --check
+cd ../frontend
+npm run build
+```
 
-学生注册不需要教师审批，也不需要昵称，只填写真实姓名、邀请码和密码。教师创建教学班时配置速记别名，例如 `OS202601`；邀请码与别名相同，学生实际注册时使用 `教学班别名-两位No.`，例如 `OS202601-06`。后端会校验真实姓名和 No. 是否匹配教师导入的 `class_rosters` 名单，匹配后创建账号，并继续用真实姓名和学号匹配其他班级名单，自动绑定同一学生的多个班级。学生后续加入新班级时，使用真实姓名、新邀请码和原密码即可绑定到原账号。学生登录时可使用真实姓名或任一已绑定学生编号，不再支持旧版本测试昵称；如果真实姓名匹配多个账号且密码也相同，后端会要求改用学生编号登录。Excel 中的自然班级只作为学生信息字段保存，不作为教学班。
+修改接口后先重新生成索引，再使用 --check。测试使用内存SQLite和内联批改，不能替代Ubuntu/MySQL/Docker真实部署验收。
 
-教师注册后会以 `teacher_status=pending` 保存，登录时如果尚未审批会被拒绝。管理员通过审批接口把教师状态改为 `approved` 后，教师才能正常登录。管理员可查看现有教师和教学班，但不能创建教学班或维护名单。管理员账号不开放网页注册，需要通过 `create-admin` CLI 命令创建，避免普通用户自助注册为管理员。
+## 实现边界
 
-前端 M1 采用简洁工作台布局。右上角只显示当前角色和用户名：管理员为橙色文字、教师为蓝色文字、学生为绿色文字；学生用户名显示真实姓名。教师页面默认只显示教学班列表，学生列表、导入名单、编辑学生和课程信息编辑都通过按钮唤起。
+routes 负责HTTP和权限入口；models 定义数据与序列化；services 封装名单、文件校验、评测、LLM与导出。学生用真实姓名及 教学班别名-两位No. 邀请码匹配名单，按姓名/长学号自动绑定多个班级；学生登录使用真实姓名或绑定编号。教师需审批，管理员不维护名单。
 
-当前限制：
+当前自动批改使用进程内串行队列；生产仅配置一个Gunicorn worker，重启任务恢复和公开评测安全限制见部署指南。教师分数只有发布后学生可见，AI分数只是建议。CLI导出严格校验编号后提取短编号，只生成文本。
 
-- M1 暂未加入 CSRF 防护，后续部署前需要补齐。
-- M1 已完成账号权限、教学班、Excel 名单导入和注册所需的最小名单管理能力，作业提交、批改和导出放在后续里程碑。
-- 本地默认 SQLite，云端 MySQL 配置会在部署里程碑补充。
+首期规范要求.py/.md；现有代码还保留ZIP/图片提交能力，生产作业显式限定文件白名单。生产环境要求HTTPS、强Session密钥、可信Origin和LLM加密key；旧教师明文key需转换。未进行实际云端部署或100并发压测。

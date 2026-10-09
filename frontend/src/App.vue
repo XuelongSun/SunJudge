@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import MarkdownIt from 'markdown-it'
-import hljs from 'highlight.js'
-import katex from 'katex'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { homeworkMarkdown, feedbackMarkdown, reportDate } from './reportTemplates'
+import { aiResultRows } from './gradingPresentation'
+import { progressPercent, filenamePreview, insertAtSelection } from './presentation'
+import ProgressCard from './components/ProgressCard.vue'
+import { renderContent } from './markdown'
+import MarkdownEditor from './components/MarkdownEditor.vue'
+import type { MarkdownDocument } from './api'
 import 'highlight.js/styles/github.css'
 import 'katex/dist/katex.min.css'
 import {
@@ -21,7 +25,7 @@ import {
   Upload,
   View
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type InputInstance } from 'element-plus'
 import {
   api,
   type AdminClass,
@@ -62,6 +66,10 @@ type AiReportModule = {
   status?: string
   message?: string
   criteria_items?: AiReportCriterion[]
+  score?: number
+  max_score?: number
+  summary?: string
+  criteria_results?: Array<AiReportCriterion & { criterion_id?: number; score?: number; max_score?: number; reason?: string; comment?: string }>
 }
 
 const currentUser = ref<User | null>(null)
@@ -71,6 +79,13 @@ const studentClasses = ref<PublicClass[]>([])
 const selectedClassId = ref<number | undefined>()
 const selectedStudentClassId = ref<number | undefined>()
 const roster = ref<RosterEntry[]>([])
+const selectedRoster = ref<RosterEntry[]>([])
+const batchRosterDialogVisible = ref(false)
+const batchSourceClass = ref('')
+const batchRosterLoading = ref(false)
+const filenamePreviewStudent = ref<RosterEntry | null>(null)
+const filenameTemplateInput = ref<InputInstance>()
+const filenameSelection = reactive({ start: 0, end: 0 })
 const managedAssignments = ref<Assignment[]>([])
 const studentAssignments = ref<Assignment[]>([])
 const submissionRows = ref<AssignmentSubmissionRow[]>([])
@@ -100,6 +115,14 @@ const programEvaluationDialogVisible = ref(false)
 const aiEvaluationDialogVisible = ref(false)
 const submissionsDrawerVisible = ref(false)
 const submissionDialogVisible = ref(false)
+const markdownDialogVisible = ref(false)
+const studentMarkdownDocument = ref<MarkdownDocument | null>(null)
+const studentMarkdownContent = ref('')
+const teacherMarkdownDocument = ref<MarkdownDocument | null>(null)
+const teacherMarkdownEditor = ref<{ flush: () => Promise<void> }>()
+const studentMarkdownEditor = ref<{ flush: () => Promise<void> }>()
+let teacherEditorSession = 0
+
 const gradeReviewDialogVisible = ref(false)
 const submissionPreviewDialogVisible = ref(false)
 const feedbackPreviewDialogVisible = ref(false)
@@ -182,7 +205,8 @@ const assignmentForm = reactive({
       allowed_extensions: ['.py', '.md', '.zip', '.jpg', '.png'],
       max_size_mb: 5,
       filename_template: '{student_id}_{assignment_code}{extension}',
-      required: true
+      required: true,
+      weight_percent: 100
     }
   ] as SubmissionRequirement[],
   rubric: '',
@@ -197,7 +221,8 @@ const submissionRequirementForm = reactive<SubmissionRequirement>({
   allowed_extensions: ['.md'],
   max_size_mb: 5,
   filename_template: '{student_id}_{assignment_code}{extension}',
-  required: true
+  required: true,
+  weight_percent: 0
 })
 
 const programEvaluationForm = reactive<ProgramEvaluation>({
@@ -242,7 +267,7 @@ const currentClass = computed(() => adminClasses.value.find((item) => item.id ==
 const currentStudentClass = computed(() => studentClasses.value.find((item) => item.id === selectedStudentClassId.value))
 const selectedAssignment = computed(() => managedAssignments.value.find((item) => item.id === selectedAssignmentId.value))
 const selectedStudentAssignment = computed(() => studentAssignments.value.find((item) => item.id === selectedStudentAssignmentId.value))
-const reviewTotalScore = computed(() => Number(Math.min(selectedAssignment.value?.max_score ?? 100, reviewFileForms.value.reduce((total, item) => total + Number(item.score || 0), 0)).toFixed(2)))
+const reviewTotalScore = computed(() => Number(Math.min(selectedAssignment.value?.max_score ?? 100, reviewFileForms.value.reduce((total, item) => total + (reviewWeightPercent(item) > 0 ? Number(item.score || 0) : 0), 0)).toFixed(2)))
 const reviewWeightTotal = computed(() => Number(reviewFileForms.value.reduce((total, item) => total + reviewWeightPercent(item), 0).toFixed(2)))
 const reviewWeightValid = computed(() => Math.abs(reviewWeightTotal.value - 100) < 0.01)
 const previewAssignment = computed(() => {
@@ -280,6 +305,14 @@ const previewAssignment = computed(() => {
   } as Assignment
 })
 const selectedClassRosterCount = computed(() => currentClass.value?.roster_count ?? roster.value.length)
+const submissionFilenameExamples = computed(() => {
+  const example = filenamePreviewStudent.value
+  const alias = currentClass.value?.alias ?? 'OS202601'
+  return submissionRequirementForm.allowed_extensions.map(extension => filenamePreview(submissionRequirementForm.filename_template, {
+    course_alias: alias, student_id: example?.student_id ?? `${alias}-06`, student_no: example?.student_no ?? '06',
+    name: example?.student_name ?? '示例学生', assignment_code: assignmentForm.code || 'hw1', extension
+  }))
+})
 const accountDisplayName = computed(() => {
   if (!currentUser.value) {
     return ''
@@ -296,6 +329,7 @@ const expectedSubmissionName = computed(() => {
     .replace('{student_id}', student?.student_id ?? '')
     .replace('{student_no}', student?.student_no ?? '')
     .replace('{assignment_code}', submittingAssignment.value.code)
+    .replace('{course_alias}', currentStudentClass.value.alias)
     .replace('{name}', student?.student_name ?? currentUser.value?.student_name ?? '')
     .replace('{extension}', fileExt)
 })
@@ -382,7 +416,9 @@ function isConfirmedSubmission(submission: Submission) {
 }
 
 function uploadedRequiredKeys(assignment: Assignment) {
-  return new Set((assignment.submissions ?? []).map((submission) => submission.submission_item_key))
+  const keys = new Set((assignment.submissions ?? []).map((submission) => submission.submission_item_key))
+  Object.entries(assignment.markdown_drafts ?? {}).forEach(([key, draft]) => { if (draft.has_content) keys.add(key) })
+  return keys
 }
 
 function confirmedRequiredKeys(assignment: Assignment) {
@@ -396,6 +432,7 @@ function hasAllRequiredUploads(assignment: Assignment) {
 }
 
 function hasAllRequiredConfirmedSubmissions(assignment: Assignment) {
+  if (Object.values(assignment.markdown_drafts ?? {}).some(draft => draft.pending_changes)) return false
   const required = assignment.submission_requirements.filter((item) => item.required)
   const confirmedKeys = confirmedRequiredKeys(assignment)
   return required.length > 0 && required.every((item) => confirmedKeys.has(item.key))
@@ -437,6 +474,8 @@ function submissionForRequirement(assignment: Assignment, key: string) {
 }
 
 function requirementStatusLabel(assignment: Assignment, key: string) {
+  const draft = assignment.markdown_drafts?.[key]
+  if (draft?.pending_changes) return draft.has_content ? '草稿待提交' : '草稿为空'
   const submission = submissionForRequirement(assignment, key)
   if (!submission) {
     return '未上传'
@@ -445,6 +484,7 @@ function requirementStatusLabel(assignment: Assignment, key: string) {
 }
 
 function requirementStatusType(assignment: Assignment, key: string) {
+  if (assignment.markdown_drafts?.[key]?.pending_changes) return 'warning'
   const submission = submissionForRequirement(assignment, key)
   if (!submission) {
     return 'info'
@@ -456,11 +496,12 @@ function submissionActionLabel(assignment: Assignment, key: string) {
   if (assignment.assignment_grade?.status === 'published') {
     return '已反馈'
   }
+  if (assignment.submission_requirements.find(item => item.key === key)?.allowed_extensions.includes('.md')) return '在线编辑'
   return submissionForRequirement(assignment, key) ? '重新上传' : '上传文件'
 }
 
 function canSubmitRequirement(assignment: Assignment) {
-  return assignment.assignment_grade?.status !== 'published'
+  return !assignment.is_expired && assignment.assignment_grade?.status !== 'published'
 }
 
 function canConfirmAssignmentSubmission(assignment: Assignment) {
@@ -500,7 +541,8 @@ function teacherGradingStateLabel(state?: string) {
 }
 
 function teacherGradingStateType(state?: string) {
-  if (state === 'published' || state === 'reviewed') {
+  if (state === 'reviewed') return 'warning'
+  if (state === 'published') {
     return 'success'
   }
   if (state === 'needs_review') {
@@ -510,6 +552,7 @@ function teacherGradingStateType(state?: string) {
 }
 
 function studentGradeStatusLabel(assignment: Assignment) {
+  if (assignment.is_expired) return '已过期'
   if (assignment.assignment_grade?.status === 'published') {
     return '已批改'
   }
@@ -520,6 +563,7 @@ function studentGradeStatusLabel(assignment: Assignment) {
 }
 
 function studentGradeStatusType(assignment: Assignment) {
+  if (assignment.is_expired) return 'danger'
   if (assignment.assignment_grade?.status === 'published') {
     return 'success'
   }
@@ -686,10 +730,6 @@ function aiReportModules(grading?: GradingResult | null) {
   return Array.isArray(modules) ? (modules as AiReportModule[]) : []
 }
 
-function aiModuleCriteria(module: AiReportModule) {
-  return Array.isArray(module.criteria_items) ? module.criteria_items : []
-}
-
 function openSubmissionDownload(submission: Submission) {
   window.open(api.submissionDownloadUrl(submission.id), '_blank', 'noopener')
 }
@@ -710,7 +750,7 @@ function manualSubmissionKeys(assignment?: Assignment | null) {
     ...programEvaluationKeys(assignment),
     ...aiEvaluationKeys(assignment)
   ])
-  return new Set(assignment.submission_requirements.filter((item) => !evaluated.has(item.key)).map((item) => item.key))
+  return new Set(assignment.submission_requirements.filter((item) => item.required && !evaluated.has(item.key)).map((item) => item.key))
 }
 
 function reviewKindForSubmission(submission: Submission) {
@@ -858,7 +898,9 @@ function manualWeightPercentForKey(key: string) {
 }
 
 function reviewWeightPercent(item: FileReview) {
-  return Number((configuredEvaluationWeightForKey(item.submission_item_key) || manualWeightPercentForKey(item.submission_item_key)).toFixed(2))
+  const requirement = selectedAssignment.value?.submission_requirements.find(value => value.key === item.submission_item_key)
+  if (!requirement?.required) return 0
+  return Number((requirement.weight_percent ?? (configuredEvaluationWeightForKey(item.submission_item_key) || manualWeightPercentForKey(item.submission_item_key))).toFixed(2))
 }
 
 function maxScoreForReviewItem(item: FileReview) {
@@ -894,7 +936,7 @@ function buildReviewFileForms(row: AssignmentSubmissionRow) {
       filename: submission.original_filename,
       review_kind: reviewKind,
       review_status: saved?.review_status ?? ((row.assignment_grade?.status === 'reviewed' || row.assignment_grade?.status === 'published') ? 'confirmed' : 'pending'),
-      score: Number(saved?.score ?? (reviewKind === 'program' ? submission.latest_judge_run?.score ?? 0 : 0)),
+      score: selectedAssignment.value?.submission_requirements.find(item => item.key === submission.submission_item_key)?.required === false ? 0 : Number(saved?.score ?? (reviewKind === 'program' ? submission.latest_judge_run?.score ?? 0 : 0)),
       comment: saved?.comment ?? defaultReviewComment(submission, reviewKind)
     }
   })
@@ -912,36 +954,42 @@ function defaultReviewComment(submission: Submission, kind: FileReview['review_k
   }
   return 'AI 评测建议等待教师复核'
 }
+function assignmentMarkdown(assignment: Assignment) {
+  const courseClass = [...adminClasses.value, ...studentClasses.value].find(item => item.id === assignment.class_id)
+  return homeworkMarkdown({
+    title: assignment.title, course: courseClass?.course.name ?? '-',
+    teacher: courseClass?.course.teacher_name ?? currentUser.value?.username ?? '-',
+    publishedAt: assignment.published_at ? reportDate(assignment.published_at) : '未发布',
+    deadline: reportDate(assignment.deadline), maxScore: assignment.max_score,
+    description: assignment.description
+  })
+}
+
+function assignmentFormMarkdown() {
+  return assignmentMarkdown({
+    ...previewAssignment.value, title: assignmentForm.title || '作业标题',
+    description: assignmentForm.description, deadline: assignmentForm.deadline || null,
+    max_score: Number(assignmentForm.max_score)
+  })
+}
+
 function generatedFeedbackReport() {
   const assignment = selectedAssignment.value
-  const studentName = reviewingSubmission.value?.student?.student_name ?? reviewingSubmissionRow.value?.roster.student_name ?? '学生'
-  const total = reviewTotalScore.value
-  const lines = [
-    `# ${assignment?.title ?? '作业'} 批改反馈`,
-    '',
-    `- 学生：${studentName}`,
-    `- 作业代码：${assignment?.code ?? '-'}`,
-    `- 总分：${total} / ${assignment?.max_score ?? 100}`,
-    '',
-    '## 文件评分'
-  ]
-  reviewFileForms.value.forEach((item, index) => {
-    lines.push(
-      '',
-      `### ${item.submission_item_label || `文件 ${index + 1}`}`,
-      '',
-      `- 文件：${item.filename || '-'}`,
-      `- 类型：${reviewKindLabel(item.review_kind)}`,
-      `- 权重：${reviewWeightPercent(item)}%`,
-      `- 得分：${Number(item.score || 0)} / ${maxScoreForReviewItem(item)}`,
-      '',
-      '评语：',
-      '',
-      item.comment || '-'
-    )
+  const row = reviewingSubmissionRow.value
+  const courseClass = currentClass.value
+  return feedbackMarkdown({
+    name: row?.roster.student_name ?? reviewingSubmission.value?.student?.student_name ?? '学生',
+    studentNumber: row?.roster.student_number ?? '-', code: assignment?.code ?? '-',
+    submittedAt: reportDate(reviewingSubmission.value?.submitted_at ?? null),
+    deadline: reportDate(assignment?.deadline ?? null), score: reviewTotalScore.value,
+    course: courseClass?.course.name ?? '-', teacher: courseClass?.course.teacher_name ?? '-',
+    publishedAt: reportDate(new Date().toISOString()), comment: gradeReviewForm.teacher_comment || '',
+    files: reviewFileForms.value.map(item => ({
+      label: item.submission_item_label || '文件', filename: item.filename || '-',
+      weight: reviewWeightPercent(item), score: Number(item.score || 0),
+      maxScore: maxScoreForReviewItem(item), comment: item.comment || '-'
+    }))
   })
-  lines.push('', '## 教师总评', '', gradeReviewForm.teacher_comment || '')
-  return lines.join('\n')
 }
 function submissionPreviewMarkdown() {
   if (!previewingSubmission.value || !submissionPreview.value?.content) {
@@ -966,68 +1014,6 @@ function previewLanguage(filename: string) {
     return 'cpp'
   }
   return ''
-}
-
-function escapeMarkdownTable(value: string) {
-  return String(value || '').replace(/\|/g, '\\|').replace(/\n/g, '<br>')
-}
-
-const markdownRenderer = new MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: true,
-  highlight(code, language) {
-    const normalizedLanguage = language && hljs.getLanguage(language) ? language : ''
-    if (normalizedLanguage) {
-      return `<pre class="hljs"><code>${hljs.highlight(code, { language: normalizedLanguage, ignoreIllegals: true }).value}</code></pre>`
-    }
-    return `<pre class="hljs"><code>${escapeHtml(code)}</code></pre>`
-  }
-})
-
-function renderContent(value: string | null, format: TextFormat) {
-  const text = value || ''
-  if (format !== 'markdown') {
-    return escapeHtml(text).replace(/\n/g, '<br>')
-  }
-  const { source, tokens } = tokenizeMath(text)
-  let html = markdownRenderer.render(source)
-  tokens.forEach((token) => {
-    html = html.split(token.placeholder).join(token.html)
-  })
-  return html
-}
-
-function tokenizeMath(text: string) {
-  const tokens: Array<{ placeholder: string; html: string }> = []
-  let source = text.replace(/(^|\n)\$\$([\s\S]+?)\$\$(?=\n|$)/g, (match, prefix: string, formula: string) => {
-    const placeholder = `SUNJUDGE_MATH_BLOCK_${tokens.length}`
-    tokens.push({ placeholder, html: renderMath(formula, true) })
-    return `${prefix}${placeholder}`
-  })
-  source = source.replace(/\$([^$\n]+?)\$/g, (match, formula: string) => {
-    const placeholder = `SUNJUDGE_MATH_INLINE_${tokens.length}`
-    tokens.push({ placeholder, html: renderMath(formula, false) })
-    return placeholder
-  })
-  return { source, tokens }
-}
-
-function renderMath(formula: string, displayMode: boolean) {
-  try {
-    return katex.renderToString(formula.trim(), { displayMode, throwOnError: false, strict: false })
-  } catch {
-    return `<code>${escapeHtml(formula)}</code>`
-  }
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;')
 }
 
 async function selectStudentClass(courseClass: PublicClass) {
@@ -1309,15 +1295,38 @@ async function openRosterDrawer(courseClass: AdminClass) {
 
 async function loadRoster(classId: number) {
   rosterLoading.value = true
+  selectedRoster.value = []
   try {
     selectedClassId.value = classId
     importForm.class_id = classId
     const result = await api.listRoster(classId)
     roster.value = result.roster
+    selectedRoster.value = []
   } catch (error) {
     ElMessage.error((error as Error).message)
   } finally {
     rosterLoading.value = false
+  }
+}
+
+async function batchRoster(action: 'update_class' | 'delete') {
+  const classId = selectedClassId.value
+  if (!classId || !selectedRoster.value.length || batchRosterLoading.value) return
+  const entryIds = selectedRoster.value.map(entry => entry.id)
+  try {
+    if (action === 'delete') {
+      await ElMessageBox.confirm(`删除所选 ${entryIds.length} 名学生的名单项？`, '批量删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    }
+    batchRosterLoading.value = true
+    const result = await api.batchRosterEntries(classId, { entry_ids: entryIds, action, source_class: batchSourceClass.value })
+    batchRosterDialogVisible.value = false
+    ElMessage.success(`已${action === 'delete' ? '删除' : '更新'} ${result.affected_count} 名学生`)
+    await loadRoster(classId)
+    await loadTeacherDashboard()
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error((error as Error).message)
+  } finally {
+    batchRosterLoading.value = false
   }
 }
 
@@ -1420,7 +1429,8 @@ function resetAssignmentForm(type: AssignmentType = 'homework') {
       allowed_extensions: ['.py', '.md', '.zip', '.jpg', '.png'],
       max_size_mb: 5,
       filename_template: '{student_id}_{assignment_code}{extension}',
-      required: true
+      required: true,
+      weight_percent: 100
     }
   ]
   assignmentForm.rubric = ''
@@ -1429,7 +1439,7 @@ function resetAssignmentForm(type: AssignmentType = 'homework') {
   assignmentForm.ai_evaluations = []
 }
 
-function openAssignmentDialog(courseClass: AdminClass, assignment?: Assignment) {
+async function openAssignmentDialog(courseClass: AdminClass, assignment?: Assignment) {
   selectedClassId.value = courseClass.id
   if (!assignment) {
     resetAssignmentForm()
@@ -1457,7 +1467,20 @@ function openAssignmentDialog(courseClass: AdminClass, assignment?: Assignment) 
     assignmentForm.program_evaluations = assignment.program_evaluations.map((item) => normalizeProgramEvaluationForForm(item))
     assignmentForm.ai_evaluations = assignment.ai_evaluations.map((item) => normalizeAiEvaluationForForm(item))
   }
+  teacherMarkdownDocument.value = null
+  const session = ++teacherEditorSession
   assignmentDialogVisible.value = true
+  try {
+    const result = await api.openMarkdownDocument({ class_id: courseClass.id, assignment_id: assignment?.id, kind: 'description' })
+    if (session !== teacherEditorSession || !assignmentDialogVisible.value) return
+    teacherMarkdownDocument.value = result.document
+    assignmentForm.description = result.document.content
+  } catch (error) { ElMessage.error((error as Error).message) }
+}
+
+async function closeTeacherMarkdownEditor(done: () => void) {
+  try { await teacherMarkdownEditor.value?.flush(); teacherEditorSession++; done() }
+  catch (error) { await confirmCloseUnsavedEditor(error, done) }
 }
 
 function openAssignmentPreview(assignment?: Assignment) {
@@ -1467,6 +1490,7 @@ function openAssignmentPreview(assignment?: Assignment) {
 
 function assignmentPayload(status: Assignment['status']): AssignmentPayload {
   return {
+    markdown_document_id: teacherMarkdownDocument.value?.id,
     title: assignmentForm.title,
     code: assignmentForm.code,
     type: assignmentForm.type,
@@ -1526,9 +1550,29 @@ function resetSubmissionRequirementForm() {
   submissionRequirementForm.max_size_mb = 5
   submissionRequirementForm.filename_template = '{student_id}_{assignment_code}{extension}'
   submissionRequirementForm.required = true
+  submissionRequirementForm.weight_percent = Math.max(0, 100 - assignmentForm.submission_requirements.reduce((sum, item) => sum + Number(item.weight_percent ?? 0), 0))
 }
 
-function openSubmissionRequirementDialog(index?: number) {
+function rememberFilenameSelection() {
+  const input = filenameTemplateInput.value?.input
+  if (input) {
+    filenameSelection.start = input.selectionStart ?? input.value.length
+    filenameSelection.end = input.selectionEnd ?? filenameSelection.start
+  }
+}
+
+async function insertFilenameField(field: string) {
+  rememberFilenameSelection()
+  const inserted = insertAtSelection(submissionRequirementForm.filename_template, `{${field}}`, filenameSelection.start, filenameSelection.end)
+  submissionRequirementForm.filename_template = inserted.value
+  filenameSelection.start = filenameSelection.end = inserted.cursor
+  await nextTick()
+  const input = filenameTemplateInput.value?.input
+  input?.focus()
+  input?.setSelectionRange(inserted.cursor, inserted.cursor)
+}
+
+async function openSubmissionRequirementDialog(index?: number) {
   resetSubmissionRequirementForm()
   if (index !== undefined) {
     const requirement = assignmentForm.submission_requirements[index]
@@ -1541,10 +1585,20 @@ function openSubmissionRequirementDialog(index?: number) {
     submissionRequirementForm.filename_template = next === 1 ? '{student_id}_{assignment_code}{extension}' : `{student_id}_{assignment_code}_file${next}{extension}`
   }
   submissionRequirementDialogVisible.value = true
+  filenameSelection.start = filenameSelection.end = submissionRequirementForm.filename_template.length
+  filenamePreviewStudent.value = null
+  const classId = selectedClassId.value
+  if (classId) {
+    try {
+      const result = await api.listRoster(classId)
+      if (selectedClassId.value === classId) filenamePreviewStudent.value = result.roster[0] ?? null
+    } catch { /* A synthetic example remains available if the roster cannot be read. */ }
+  }
 }
 
 function saveSubmissionRequirement() {
   const saved = { ...submissionRequirementForm, allowed_extensions: [...submissionRequirementForm.allowed_extensions] }
+  if (!saved.required) saved.weight_percent = 0
   if (editingRequirementIndex.value === null) {
     assignmentForm.submission_requirements.push(saved)
   } else {
@@ -1728,6 +1782,8 @@ async function saveAssignment(status: Assignment['status']) {
     return
   }
   try {
+    if (!teacherMarkdownDocument.value) { ElMessage.error('请等待 Markdown 编辑器加载完成'); return }
+    await teacherMarkdownEditor.value?.flush()
     const payload = assignmentPayload(status)
     let resetGrading = false
     if (editingAssignmentId.value && editingAssignmentOriginalStatus.value === 'published') {
@@ -1904,7 +1960,6 @@ async function saveGradeReview(status: GradingStatus = gradeReviewForm.status) {
     gradeReviewForm.feedback = generatedFeedbackReport()
     await api.reviewSubmissionGrade(reviewingSubmission.value.id, {
       final_score: Number(gradeReviewForm.final_score),
-      feedback: gradeReviewForm.feedback,
       teacher_comment: gradeReviewForm.teacher_comment,
       status,
       file_reviews: reviewFilePayloads()
@@ -1980,11 +2035,44 @@ async function loadStudentAssignments(classId: number) {
   }
 }
 
-function openSubmissionDialog(assignment: Assignment, requirement: SubmissionRequirement) {
+async function openSubmissionDialog(assignment: Assignment, requirement: SubmissionRequirement) {
   submittingAssignment.value = assignment
   submittingRequirement.value = requirement
   selectedSubmissionFile.value = null
+  if (requirement.allowed_extensions.includes('.md')) {
+    try {
+      const result = await api.openMarkdownDocument({ class_id: assignment.class_id, assignment_id: assignment.id, kind: 'submission', item_key: requirement.key })
+      studentMarkdownDocument.value = result.document
+      studentMarkdownContent.value = result.document.content
+      markdownDialogVisible.value = true
+    } catch (error) { ElMessage.error((error as Error).message) }
+    return
+  }
   submissionDialogVisible.value = true
+}
+
+async function confirmCloseUnsavedEditor(error: unknown, done: () => void) {
+  try {
+    await ElMessageBox.confirm(`${(error as Error).message} 当前内容尚未保存，请先取消关闭并下载 .md 保留内容。仍要关闭吗？`, '草稿未保存', {
+      confirmButtonText: '仍然关闭', cancelButtonText: '继续编辑', type: 'warning'
+    })
+    done()
+  } catch { /* Keep the editor open so the content can be downloaded. */ }
+}
+
+async function closeStudentMarkdownEditor(done: () => void) {
+  try {
+    await studentMarkdownEditor.value?.flush()
+    if (selectedStudentClassId.value) await loadStudentAssignments(selectedStudentClassId.value)
+    done()
+  } catch (error) { await confirmCloseUnsavedEditor(error, done) }
+}
+
+async function uploadAlternativeFormat() {
+  await closeStudentMarkdownEditor(() => {
+    markdownDialogVisible.value = false
+    submissionDialogVisible.value = true
+  })
 }
 
 async function selectStudentAssignment(row: Assignment) {
@@ -2264,7 +2352,8 @@ onMounted(() => {
           </el-table>
         </section>
 
-        <section v-if="currentStudentClass" class="dashboard-card">
+        <div v-if="currentStudentClass" class="student-assignment-cards">
+        <section class="workflow-card student-assignment-overview">
           <div class="card-header">
             <div>
               <h2>{{ currentStudentClass.alias }}</h2>
@@ -2286,26 +2375,10 @@ onMounted(() => {
             </div>
           </div>
           <div class="student-summary-grid">
-            <div>
-              <span>已发布</span>
-              <strong>{{ currentStudentClass.published_assignment_count ?? 0 }}</strong>
-            </div>
-            <div>
-              <span>已完成</span>
-              <strong>{{ currentStudentClass.completed_assignment_count ?? 0 }}</strong>
-            </div>
-            <div>
-              <span>待提交</span>
-              <strong>{{ currentStudentClass.pending_assignment_count ?? 0 }}</strong>
-            </div>
-            <div>
-              <span>已反馈</span>
-              <strong>{{ currentStudentClass.published_grade_count ?? 0 }}</strong>
-            </div>
-            <div>
-              <span>平均分</span>
-              <strong>{{ studentClassAverageScore(currentStudentClass) }}</strong>
-            </div>
+            <ProgressCard label="待提交" :value="String(currentStudentClass.pending_assignment_count ?? 0)" number-only :accent="(currentStudentClass.pending_assignment_count ?? 0) > 0" />
+            <ProgressCard label="完成" :value="`${currentStudentClass.completed_assignment_count ?? 0} / ${currentStudentClass.published_assignment_count ?? 0}`" :completed="currentStudentClass.completed_assignment_count ?? 0" :expired="currentStudentClass.expired_assignment_count ?? 0" :total="currentStudentClass.published_assignment_count ?? 0" :note="`已完成 / 已发布 · 已过期 ${currentStudentClass.expired_assignment_count ?? 0}`" />
+            <ProgressCard label="分数" :value="`${studentClassAverageScore(currentStudentClass)} / ${formatOptionalNumber(currentStudentClass.average_max_score)}`" :percentage="progressPercent(currentStudentClass.score_rate, 1)" note="平均分 / 满分 · 含逾期零分" />
+            <ProgressCard label="批改进度" :value="`${currentStudentClass.published_grade_count ?? 0} / ${currentStudentClass.completed_assignment_count ?? 0}`" :percentage="progressPercent(currentStudentClass.published_grade_count, currentStudentClass.completed_assignment_count)" note="已批改 / 已提交" />
           </div>
           <el-table
             :data="studentAssignments"
@@ -2330,31 +2403,33 @@ onMounted(() => {
               </template>
             </el-table-column>
             <el-table-column label="成绩" width="100">
-              <template #default="{ row }">{{ row.assignment_grade?.status === 'published' ? `${row.assignment_grade.final_score ?? 0}/${row.max_score}` : '-' }}</template>
+              <template #default="{ row }">{{ row.display_score != null ? `${row.display_score}/${row.max_score}` : '-' }}</template>
             </el-table-column>
           </el-table>
-          <section v-if="selectedStudentAssignment" class="assignment-detail-panel">
-            <div class="card-header">
-              <div>
-                <h2>{{ selectedStudentAssignment.title }}</h2>
-                <p>{{ formatDate(selectedStudentAssignment.deadline) }} · {{ selectedStudentAssignment.max_score }} 分</p>
-              </div>
-              <div v-if="selectedStudentAssignment.assignment_grade?.status === 'published'" class="toolbar-actions">
-                <el-tag type="success" effect="plain">
-                  {{ selectedStudentAssignment.assignment_grade.final_score ?? 0 }} / {{ selectedStudentAssignment.max_score }} 分
-                </el-tag>
-                <el-button type="success" :icon="View" @click="openStudentFeedbackDialog">查看批改反馈</el-button>
-              </div>
-            </div>
-            <div class="assignment-rendered" v-html="renderContent(selectedStudentAssignment.description, selectedStudentAssignment.description_format)" />
-            <h2>需提交文件</h2>
-            <el-table :data="selectedStudentAssignment.submission_requirements" row-key="key" empty-text="暂无提交项">
-              <el-table-column prop="label" label="提交项" min-width="160" />
-              <el-table-column label="状态" width="120">
-                <template #default="{ row }">
-                  <el-tag :type="requirementStatusType(selectedStudentAssignment, row.key)" effect="plain">
-                    {{ requirementStatusLabel(selectedStudentAssignment, row.key) }}
+        </section>
+          <template v-if="selectedStudentAssignment">
+            <section class="workflow-card student-assignment-description" aria-label="作业说明">
+              <div class="assignment-rendered" v-html="renderContent(assignmentMarkdown(selectedStudentAssignment), 'markdown')" />
+            </section>
+            <section class="workflow-card assignment-submission-panel" aria-labelledby="assignment-submission-title">
+              <div class="card-header">
+                <div>
+                  <h2 id="assignment-submission-title"><el-icon><Upload /></el-icon> 提交作业</h2>
+                </div>
+                <div v-if="selectedStudentAssignment.assignment_grade?.status === 'published'" class="toolbar-actions">
+                  <el-tag type="success" effect="plain">
+                    {{ selectedStudentAssignment.assignment_grade.final_score ?? 0 }} / {{ selectedStudentAssignment.max_score }} 分
                   </el-tag>
+                  <el-button type="success" :icon="View" @click="openStudentFeedbackDialog">查看批改反馈</el-button>
+                </div>
+              </div>
+              <el-table :data="selectedStudentAssignment.submission_requirements" row-key="key" empty-text="暂无提交项">
+                <el-table-column prop="label" label="提交项" min-width="160" />
+                <el-table-column label="状态" width="120">
+                  <template #default="{ row }">
+                    <el-tag :type="requirementStatusType(selectedStudentAssignment, row.key)" effect="plain">
+                      {{ requirementStatusLabel(selectedStudentAssignment, row.key) }}
+                    </el-tag>
                 </template>
               </el-table-column>
               <el-table-column label="操作" width="150">
@@ -2367,8 +2442,8 @@ onMounted(() => {
             </el-table>
             <div class="assignment-confirm-bar">
               <div>
-                <strong>确认提交后才会进入教师批改和自动评测流程</strong>
-                <span>上传文件只完成文件规则校验，确认提交后本次作业才算已提交。</span>
+                <strong>准备完成后，确认提交整份作业</strong>
+                <span>保存或上传不代表提交；确认后进入批改和评测。</span>
               </div>
               <el-button type="primary" :icon="Check" :disabled="!canConfirmAssignmentSubmission(selectedStudentAssignment)" :loading="submissionLoading" @click="confirmAssignmentSubmission(selectedStudentAssignment)">
                 确认提交作业
@@ -2376,7 +2451,8 @@ onMounted(() => {
             </div>
 
           </section>
-        </section>
+          </template>
+        </div>
       </section>
     </section>
 
@@ -2396,11 +2472,19 @@ onMounted(() => {
         <el-button @click="studentFeedbackDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
-    <el-dialog v-model="classDialogVisible" title="添加教学班" width="420px">
+    <el-dialog v-model="classDialogVisible" title="添加教学班" width="min(620px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>教学班</h2>
         <el-form-item label="班级别名">
           <el-input v-model="classForm.class_alias" placeholder="OS202601" />
         </el-form-item>
+        <el-form-item label="邀请码">
+          <el-input :model-value="classForm.class_alias || '填写别名后生成'" disabled />
+        </el-form-item>
+        </section>
+        <section class="workflow-card">
+          <h2>课程信息</h2>
         <el-form-item label="课程名称">
           <el-input v-model="classForm.course_name" placeholder="可先留空，导入 Excel 后自动更新" />
         </el-form-item>
@@ -2410,9 +2494,7 @@ onMounted(() => {
         <el-form-item label="学期">
           <el-input v-model="classForm.semester" placeholder="2025-2026-2" />
         </el-form-item>
-        <el-form-item label="邀请码">
-          <el-input :model-value="classForm.class_alias || '填写别名后生成'" disabled />
-        </el-form-item>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="classDialogVisible = false">取消</el-button>
@@ -2420,11 +2502,16 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="classMetaDialogVisible" title="编辑课程信息" width="460px">
+    <el-dialog v-model="classMetaDialogVisible" title="编辑课程信息" width="min(620px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>教学班</h2>
         <el-form-item label="教学班名称">
           <el-input v-model="classMetaForm.class_name" />
         </el-form-item>
+        </section>
+        <section class="workflow-card">
+          <h2>课程信息</h2>
         <el-form-item label="课程名称">
           <el-input v-model="classMetaForm.course_name" />
         </el-form-item>
@@ -2434,6 +2521,7 @@ onMounted(() => {
         <el-form-item label="学期">
           <el-input v-model="classMetaForm.semester" placeholder="2025-2026-2" />
         </el-form-item>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="classMetaDialogVisible = false">取消</el-button>
@@ -2468,7 +2556,14 @@ onMounted(() => {
           <el-button type="primary" :icon="CirclePlus" @click="openStudentDialog()">新增学生</el-button>
         </div>
       </div>
-      <el-table :data="roster" v-loading="rosterLoading" row-key="id" empty-text="暂无学生名单">
+      <div class="roster-batch-toolbar">
+        <span>已选 {{ selectedRoster.length }} 人</span>
+        <el-button :disabled="!selectedRoster.length || batchRosterLoading" @click="batchSourceClass = ''; batchRosterDialogVisible = true">批量修改班级</el-button>
+        <el-button type="danger" plain :disabled="!selectedRoster.length" :loading="batchRosterLoading" @click="batchRoster('delete')">批量删除</el-button>
+        <small>已注册名单受保护</small>
+      </div>
+      <el-table :data="roster" v-loading="rosterLoading" row-key="id" empty-text="暂无学生名单" @selection-change="(entries: RosterEntry[]) => selectedRoster = entries">
+        <el-table-column type="selection" width="48" :selectable="(entry: RosterEntry) => !entry.matched_user_id" />
         <el-table-column prop="student_no" label="No." width="80" />
         <el-table-column prop="student_name" label="真实姓名" min-width="120" />
         <el-table-column prop="student_number" label="学号" min-width="150" />
@@ -2496,6 +2591,18 @@ onMounted(() => {
         </el-table-column>
       </el-table>
     </el-drawer>
+
+    <el-dialog v-model="batchRosterDialogVisible" title="批量修改学生信息班级" width="min(460px, 94vw)" :close-on-click-modal="!batchRosterLoading">
+      <el-form label-position="top" @submit.prevent="batchRoster('update_class')">
+        <el-form-item :label="`所选 ${selectedRoster.length} 名学生的新班级`">
+          <el-input v-model="batchSourceClass" maxlength="120" placeholder="例如：计算机261" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="batchRosterLoading" @click="batchRosterDialogVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!batchSourceClass.trim() || !selectedRoster.length" :loading="batchRosterLoading" @click="batchRoster('update_class')">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="assignmentsDrawerVisible" size="78%" :title="currentClass ? `${currentClass.alias} 作业管理` : '作业管理'">
       <div class="drawer-toolbar">
@@ -2543,10 +2650,6 @@ onMounted(() => {
     <el-drawer v-model="assignmentPreviewDrawerVisible" size="72%" :title="`${previewAssignment.title} 预览`">
       <section class="assignment-detail-panel preview-panel">
         <div class="card-header">
-          <div>
-            <h2>{{ previewAssignment.title }}</h2>
-            <p>{{ assignmentTypeLabel(previewAssignment.type) }} · {{ formatDate(previewAssignment.deadline) }} · {{ previewAssignment.max_score }} 分</p>
-          </div>
           <div class="toolbar-actions">
             <el-button
               v-if="previewAssignment.id && previewAssignment.status === 'draft'"
@@ -2560,7 +2663,7 @@ onMounted(() => {
             <el-tag :type="assignmentStatusType(previewAssignment.status)" effect="plain">{{ assignmentStatusLabel(previewAssignment.status) }}</el-tag>
           </div>
         </div>
-            <div class="assignment-rendered" v-html="renderContent(previewAssignment.description, previewAssignment.description_format)" />
+            <div class="assignment-rendered" v-html="renderContent(assignmentMarkdown(previewAssignment), 'markdown')" />
         <h2>需提交文件</h2>
         <el-table :data="previewAssignment.submission_requirements" row-key="key" empty-text="暂无提交项">
           <el-table-column prop="label" label="提交项" min-width="140" />
@@ -2631,31 +2734,10 @@ onMounted(() => {
         </div>
       </div>
       <div v-if="gradeAnalysis" class="analysis-grid">
-        <div>
-          <span>完成情况</span>
-          <strong>{{ gradeAnalysis.submitted_count }}/{{ gradeAnalysis.expected_count }}</strong>
-          <small>{{ formatPercent(gradeAnalysis.submitted_rate) }}</small>
-        </div>
-        <div>
-          <span>平均分</span>
-          <strong>{{ formatOptionalNumber(gradeAnalysis.average_score) }}</strong>
-          <small>/ {{ gradeAnalysis.max_score }}</small>
-        </div>
-        <div>
-          <span>发布后提交</span>
-          <strong>{{ formatDays(gradeAnalysis.average_submit_days_after_publish) }}</strong>
-          <small>平均值</small>
-        </div>
-        <div>
-          <span>截止前提交</span>
-          <strong>{{ formatDays(gradeAnalysis.average_submit_days_before_deadline) }}</strong>
-          <small>负数表示迟交</small>
-        </div>
-        <div>
-          <span>已反馈</span>
-          <strong>{{ gradeAnalysis.published_count }}</strong>
-          <small>已复核/发布 {{ gradeAnalysis.reviewed_or_published_count }}</small>
-        </div>
+        <ProgressCard label="完成" :value="`${gradeAnalysis.submitted_count} / ( ${gradeAnalysis.pending_submission_count} + ${gradeAnalysis.expired_count} )`" :completed="gradeAnalysis.submitted_count" :expired="gradeAnalysis.expired_count" :total="gradeAnalysis.expected_count" note="已提交 / ( 待提交 + 已过期 )" />
+        <ProgressCard label="分数" :value="`${formatOptionalNumber(gradeAnalysis.average_score)} / ${gradeAnalysis.max_score}`" :percentage="progressPercent(gradeAnalysis.average_score, gradeAnalysis.max_score)" note="平均分 / 总分（不含过期未提交）" />
+        <ProgressCard label="速度" :value="`${formatOptionalNumber(gradeAnalysis.average_submit_days_after_publish)} / ${formatOptionalNumber(gradeAnalysis.publish_to_deadline_days)} 天`" :percentage="progressPercent(gradeAnalysis.average_submit_days_after_publish, gradeAnalysis.publish_to_deadline_days)" note="平均提交用时 / 发布至截止" />
+        <ProgressCard label="批改进度" :value="`${gradeAnalysis.published_count} / ${gradeAnalysis.submitted_count}`" :percentage="progressPercent(gradeAnalysis.published_count, gradeAnalysis.submitted_count)" :note="`已反馈 / 已提交 · 待批改 ${gradeAnalysis.pending_grading_count} · 待发布 ${gradeAnalysis.reviewed_count}`" />
       </div>
       <el-table
         :data="submissionRows"
@@ -2668,7 +2750,7 @@ onMounted(() => {
         <el-table-column type="index" label="序号" width="80" />
         <el-table-column prop="roster.student_name" label="姓名" min-width="120" />
         <el-table-column label="提交日期" min-width="120">
-          <template #default="{ row }">{{ row.submission ? formatDate(row.submission.submitted_at) : '-' }}</template>
+          <template #default="{ row }">{{ row.is_expired ? '已过期' : row.student_state === 'submitted' && row.submission ? formatDate(row.submission.submitted_at) : '-' }}</template>
         </el-table-column>
         <el-table-column label="总分" width="90" align="center">
           <template #default="{ row }">{{ row.final_score ?? '' }}</template>
@@ -2677,15 +2759,17 @@ onMounted(() => {
           <template #default="{ row }">
             <div class="status-pair">
               <el-tag :type="studentReadStateType(row.student_state)" effect="plain">学生端：{{ studentReadStateLabel(row.student_state) }}</el-tag>
-              <el-tag :type="teacherGradingStateType(row.teacher_state)" effect="plain">教师端：{{ teacherGradingStateLabel(row.teacher_state) }}</el-tag>
+              <el-tag v-if="row.student_state === 'submitted'" :type="teacherGradingStateType(row.teacher_state)" effect="plain">教师端：{{ teacherGradingStateLabel(row.teacher_state) }}</el-tag>
             </div>
           </template>
         </el-table-column>
       </el-table>
     </el-drawer>
 
-        <el-dialog v-model="scoreManagerDialogVisible" title="ScoreManagerCLI 导出" width="min(760px, 94vw)">
+        <el-dialog v-model="scoreManagerDialogVisible" title="ScoreManagerCLI 导出" width="min(760px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>导出设置</h2>
         <div class="form-grid wide">
           <el-form-item label="目标字段">
             <el-input v-model="scoreManagerForm.field" placeholder="homework / exp1" @change="generateScoreManagerCommands" />
@@ -2700,9 +2784,13 @@ onMounted(() => {
         <el-checkbox v-if="scoreManagerForm.command_type === 'regular'" v-model="scoreManagerForm.group_same_score" @change="generateScoreManagerCommands">
           同分合并为 brd
         </el-checkbox>
+        </section>
+        <section class="workflow-card">
+          <h2>命令预览</h2>
         <el-form-item label="命令文本">
           <el-input v-model="scoreManagerCommands" type="textarea" :rows="12" readonly placeholder="暂无可导出的已复核或已发布成绩" />
         </el-form-item>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="scoreManagerDialogVisible = false">关闭</el-button>
@@ -2733,10 +2821,10 @@ onMounted(() => {
           </div>
         </section>
 
-        <section class="file-review-editor redesigned-review-editor">
+        <section class="workflow-card review-files-section" aria-labelledby="review-files-title">
           <div class="card-header">
             <div>
-              <h2>逐文件批改</h2>
+              <h2 id="review-files-title">逐文件批改</h2>
               <p>权重合计 {{ reviewWeightTotal }}%，总分自动按文件评分汇总</p>
             </div>
             <el-tag :type="reviewWeightValid ? 'success' : 'danger'" effect="plain">
@@ -2747,10 +2835,10 @@ onMounted(() => {
           <div v-for="item in reviewFileForms" :key="`${item.submission_id}-${item.submission_item_key}`" class="file-review-item review-work-card">
             <div class="card-header">
               <div>
-                <h2>{{ item.submission_item_label }}</h2>
+                <h3>{{ item.submission_item_label }}</h3>
                 <p>{{ item.filename }} · {{ reviewScoringHint(item) }}</p>
               </div>
-                            <div class="toolbar-actions">
+              <div class="toolbar-actions">
                 <el-tag :type="item.review_status === 'confirmed' ? 'success' : reviewKindType(item.review_kind)" effect="plain">{{ reviewItemStateLabel(item) }}</el-tag>
                 <el-button :icon="View" @click="openSubmissionPreviewForReviewItem(item)">在线预览</el-button>
                 <el-button :icon="Download" @click="openSubmissionDownloadForReviewItem(item)">下载</el-button>
@@ -2827,18 +2915,19 @@ onMounted(() => {
               </template>
               <div v-else-if="item.review_kind === 'ai'" class="ai-report-list">
                 <div v-for="module in aiModulesForReviewItem(item)" :key="`${module.input_file_key}-${module.name}`" class="ai-report-item">
-                  <div class="card-header">
-                    <div>
-                      <strong>{{ module.name ?? 'AI 评测' }}</strong>
-                      <p>{{ module.input_file_key }} · {{ module.score_percent ?? 0 }}%</p>
-                    </div>
-                    <el-tag effect="plain">{{ module.status ?? 'pending' }}</el-tag>
-                  </div>
-                  <p class="muted-line">{{ module.message ?? '暂无模型反馈' }}</p>
-                  <el-table :data="aiModuleCriteria(module)" size="small" empty-text="暂无评分项目">
-                    <el-table-column prop="content" label="内容标准" min-width="260" show-overflow-tooltip />
-                    <el-table-column prop="weight" label="权重" width="90" />
+                  <el-table v-if="module.criteria_results?.length" :data="aiResultRows(module, selectedAssignment?.max_score ?? 100)" size="small">
+                    <el-table-column prop="content" label="评分项" min-width="180" />
+                    <el-table-column label="得分/总分（权重）" min-width="155">
+                      <template #default="{ row }">{{ row.score ?? '-' }}/{{ row.max_score ?? '-' }}（{{ row.weight_percent }}%）</template>
+                    </el-table-column>
+                    <el-table-column label="评分理由" min-width="260">
+                      <template #default="{ row }">{{ row.reason ?? row.comment ?? '-' }}</template>
+                    </el-table-column>
                   </el-table>
+                  <div v-if="module.status === 'completed'" class="ai-result-total">
+                    <strong>{{ module.score ?? 0 }} / {{ module.max_score ?? '-' }} 分</strong>
+                  </div>
+                  <div class="assignment-rendered" v-html="renderContent(module.summary ?? module.message ?? '暂无模型反馈', 'markdown')" />
                 </div>
                 <p v-if="!aiModulesForReviewItem(item).length" class="muted-line">暂无 AI 评测结果，教师可先人工复核。</p>
               </div>
@@ -2849,16 +2938,27 @@ onMounted(() => {
               <el-form-item :label="`文件评分（${reviewScoringHint(item)}）`">
                 <el-input-number v-model="item.score" :min="0" :max="maxScoreForReviewItem(item)" controls-position="right" />
               </el-form-item>
-              <el-form-item label="评语">
-                <el-input v-model="item.comment" type="textarea" :rows="3" />
+              <el-form-item label="备注">
+                <el-input v-model="item.comment" type="textarea" :rows="2" placeholder="这里只写简单备注，详细评价请放在教师总评中" />
               </el-form-item>
             </div>
           </div>
         </section>
 
-        <el-form-item label="教师总评">
-          <el-input v-model="gradeReviewForm.teacher_comment" type="textarea" :rows="3" />
-        </el-form-item>
+        <section class="workflow-card review-overall-panel" aria-labelledby="review-overall-title">
+          <div class="card-header">
+            <h2 id="review-overall-title">教师总评</h2>
+            <el-tag effect="plain">Markdown</el-tag>
+          </div>
+          <div class="markdown-edit-grid">
+            <el-form-item>
+              <el-input v-model="gradeReviewForm.teacher_comment" aria-label="教师总评 Markdown" type="textarea" :rows="14" placeholder="填写总评，支持 Markdown、公式和表情" />
+            </el-form-item>
+            <section class="markdown-live-preview" aria-label="教师总评预览">
+              <div class="assignment-rendered" v-html="renderContent(gradeReviewForm.teacher_comment, 'markdown')" />
+            </section>
+          </div>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="gradeReviewDialogVisible = false">取消</el-button>
@@ -2885,8 +2985,10 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="llmConfigDialogVisible" title="LLM 配置" width="520px">
+    <el-dialog v-model="llmConfigDialogVisible" title="LLM 配置" width="min(620px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>模型连接</h2>
         <el-form-item label="Provider">
           <el-input v-model="llmConfigForm.provider" />
         </el-form-item>
@@ -2896,12 +2998,16 @@ onMounted(() => {
         <el-form-item label="模型">
           <el-input v-model="llmConfigForm.model" placeholder="deepseek-chat" />
         </el-form-item>
+        </section>
+        <section class="workflow-card">
+          <h2>访问配置</h2>
         <el-form-item :label="llmConfig?.has_api_key ? 'API Key（留空则沿用已保存值）' : 'API Key'">
           <el-input v-model="llmConfigForm.api_key" type="password" show-password />
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="llmConfigForm.enabled" />
         </el-form-item>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="llmConfigDialogVisible = false">取消</el-button>
@@ -2909,8 +3015,10 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="submissionRequirementDialogVisible" :title="editingRequirementIndex === null ? '新增提交项' : '编辑提交项'" width="620px">
+    <el-dialog v-model="submissionRequirementDialogVisible" :title="editingRequirementIndex === null ? '新增提交项' : '编辑提交项'" width="min(720px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>基本信息</h2>
         <div class="form-grid wide">
           <el-form-item label="Key">
             <el-input v-model="submissionRequirementForm.key" placeholder="code / report" />
@@ -2919,6 +3027,9 @@ onMounted(() => {
             <el-input v-model="submissionRequirementForm.label" placeholder="Python 源代码 / 实验报告" />
           </el-form-item>
         </div>
+        </section>
+        <section class="workflow-card">
+          <h2>文件规则</h2>
         <div class="form-grid wide">
           <el-form-item label="允许扩展名">
             <el-select v-model="submissionRequirementForm.allowed_extensions" multiple>
@@ -2929,12 +3040,29 @@ onMounted(() => {
             <el-input-number v-model="submissionRequirementForm.max_size_mb" :min="0.1" :max="64" :step="0.5" controls-position="right" />
           </el-form-item>
         </div>
-        <el-form-item label="命名模板">
-          <el-input v-model="submissionRequirementForm.filename_template" placeholder="{student_id}_{assignment_code}{extension}" />
+        <el-form-item class="filename-template-field">
+          <template #label>
+            <span>命名模板</span>
+            <strong class="filename-preview-inline">{{ submissionFilenameExamples.join(' / ') }}</strong>
+          </template>
+          <el-input ref="filenameTemplateInput" v-model="submissionRequirementForm.filename_template" placeholder="{student_id}_{assignment_code}{extension}" @select="rememberFilenameSelection" @click="rememberFilenameSelection" @keyup="rememberFilenameSelection" @input="rememberFilenameSelection" @blur="rememberFilenameSelection" />
+          <div class="filename-fields">
+            <el-button v-for="field in [{ value: 'student_id', label: '学生编号' }, { value: 'student_no', label: '短编号' }, { value: 'name', label: '姓名' }, { value: 'assignment_code', label: '作业代码' }, { value: 'course_alias', label: '课程别名' }, { value: 'extension', label: '扩展名' }]" :key="field.value" size="small" @mousedown.prevent @click="insertFilenameField(field.value)">{{ field.label }} {{ '{' + field.value + '}' }}</el-button>
+          </div>
         </el-form-item>
+        </section>
+        <section class="workflow-card">
+          <h2>计分设置</h2>
+        <div class="form-grid wide">
         <el-form-item label="必交">
-          <el-switch v-model="submissionRequirementForm.required" />
+          <el-switch v-model="submissionRequirementForm.required" @change="!submissionRequirementForm.required && (submissionRequirementForm.weight_percent = 0)" />
         </el-form-item>
+        <el-form-item label="权重 %">
+          <el-input-number v-model="submissionRequirementForm.weight_percent" :min="0" :max="100" :precision="2" :disabled="!submissionRequirementForm.required" controls-position="right" />
+          <strong class="weight-score-hint">{{ submissionRequirementForm.required ? `（满分 ${Number((assignmentForm.max_score * Number(submissionRequirementForm.weight_percent ?? 0) / 100).toFixed(2))}）` : '（非必交项不计入总分）' }}</strong>
+        </el-form-item>
+        </div>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="submissionRequirementDialogVisible = false">取消</el-button>
@@ -2942,22 +3070,25 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="programEvaluationDialogVisible" :title="editingProgramEvaluationIndex === null ? '新增程序评测' : '编辑程序评测'" width="760px">
+    <el-dialog v-model="programEvaluationDialogVisible" :title="editingProgramEvaluationIndex === null ? '新增程序评测' : '编辑程序评测'" width="min(900px, 96vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>评测设置</h2>
         <div class="form-grid wide">
           <el-form-item label="模块名称">
             <el-input v-model="programEvaluationForm.name" />
           </el-form-item>
           <el-form-item label="输入文件">
             <el-select v-model="programEvaluationForm.input_file_key">
-              <el-option v-for="item in assignmentForm.submission_requirements" :key="item.key" :label="`${item.label} (${item.key})`" :value="item.key" />
+              <el-option v-for="item in assignmentForm.submission_requirements" :key="item.key" :label="`${item.label} (${item.key})`" :value="item.key" :disabled="!item.required" />
             </el-select>
           </el-form-item>
         </div>
-        <section class="evaluation-editor">
+        </section>
+        <section class="workflow-card">
           <div class="drawer-toolbar">
             <div>
-              <strong>测试用例</strong>
+              <h2>测试用例</h2>
               <span>{{ programEvaluationForm.cases.length }} 个用例，共 {{ programEvaluationScore(programEvaluationForm) }}%</span>
             </div>
             <el-button :icon="CirclePlus" @click="addProgramTestCase">增加测试用例</el-button>
@@ -2995,8 +3126,10 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="aiEvaluationDialogVisible" :title="editingAiEvaluationIndex === null ? '新增 AI 评测' : '编辑 AI 评测'" width="680px">
+    <el-dialog v-model="aiEvaluationDialogVisible" :title="editingAiEvaluationIndex === null ? '新增 AI 评测' : '编辑 AI 评测'" width="min(820px, 96vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>评测设置</h2>
         <div class="form-grid wide">
           <el-form-item label="模块名称">
             <el-input v-model="aiEvaluationForm.name" />
@@ -3007,16 +3140,17 @@ onMounted(() => {
         </div>
         <el-form-item label="输入文件">
           <el-select v-model="aiEvaluationForm.input_file_key">
-            <el-option v-for="item in assignmentForm.submission_requirements" :key="item.key" :label="`${item.label} (${item.key})`" :value="item.key" />
+            <el-option v-for="item in assignmentForm.submission_requirements" :key="item.key" :label="`${item.label} (${item.key})`" :value="item.key" :disabled="!item.required" />
           </el-select>
         </el-form-item>
         <el-form-item label="指定输入">
           <el-input v-model="aiEvaluationForm.input" type="textarea" :rows="3" />
         </el-form-item>
-        <section class="evaluation-editor">
+        </section>
+        <section class="workflow-card">
           <div class="drawer-toolbar">
             <div>
-              <strong>评分项目</strong>
+              <h2>评分项目</h2>
               <span>{{ aiEvaluationForm.criteria_items.length }} 项，权重合计 {{ aiCriteriaWeightTotal(aiEvaluationForm) }}</span>
             </div>
             <el-button :icon="CirclePlus" @click="addAiCriterionItem">新增评分项目</el-button>
@@ -3042,53 +3176,58 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="assignmentDialogVisible" :title="editingAssignmentId ? '编辑作业' : '新建作业'" fullscreen class="assignment-editor-dialog">
+    <el-dialog v-model="assignmentDialogVisible" :title="editingAssignmentId ? '编辑作业' : '新建作业'" fullscreen class="assignment-editor-dialog assignment-config-dialog" :before-close="closeTeacherMarkdownEditor">
       <el-form label-position="top" @submit.prevent>
-        <div class="form-grid wide">
-          <el-form-item label="作业标题">
-            <el-input v-model="assignmentForm.title" />
+        <section class="workflow-card" aria-labelledby="assignment-basics-title">
+          <div class="card-header"><h2 id="assignment-basics-title">基本信息</h2></div>
+          <div class="form-grid wide">
+            <el-form-item label="作业标题">
+              <el-input v-model="assignmentForm.title" />
+            </el-form-item>
+            <el-form-item label="作业代码">
+              <el-input v-model="assignmentForm.code" placeholder="hw1 / exp1" />
+            </el-form-item>
+          </div>
+          <div class="form-grid wide">
+            <el-form-item label="类型">
+              <el-select v-model="assignmentForm.type" @change="applyTypeDefaults">
+                <el-option v-for="item in assignmentTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="总分">
+              <el-input-number v-model="assignmentForm.max_score" :min="1" :max="1000" controls-position="right" />
+            </el-form-item>
+          </div>
+          <div class="form-grid wide">
+            <el-form-item label="截止时间">
+              <el-date-picker v-model="assignmentForm.deadline" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" />
+            </el-form-item>
+            <el-form-item label="允许迟交">
+              <el-switch v-model="assignmentForm.allow_late" />
+            </el-form-item>
+          </div>
+          <el-form-item v-if="assignmentForm.allow_late" label="迟交规则">
+            <el-input v-model="assignmentForm.late_policy" />
           </el-form-item>
-          <el-form-item label="作业代码">
-            <el-input v-model="assignmentForm.code" placeholder="hw1 / exp1" />
-          </el-form-item>
-        </div>
-        <div class="form-grid wide">
-          <el-form-item label="类型">
-            <el-select v-model="assignmentForm.type" @change="applyTypeDefaults">
-              <el-option v-for="item in assignmentTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="总分">
-            <el-input-number v-model="assignmentForm.max_score" :min="1" :max="1000" controls-position="right" />
-          </el-form-item>
-        </div>
-        <div class="markdown-edit-grid assignment-markdown-grid">
-          <el-form-item label="作业说明 Markdown">
-            <el-input v-model="assignmentForm.description" type="textarea" :rows="18" />
-          </el-form-item>
-          <section class="markdown-live-preview">
-            <div class="preview-title">实时预览</div>
-            <div class="assignment-rendered" v-html="renderContent(assignmentForm.description, 'markdown')" />
-          </section>
-        </div>
-        <div class="form-grid wide">
-          <el-form-item label="截止时间">
-            <el-date-picker v-model="assignmentForm.deadline" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" />
-          </el-form-item>
-          <el-form-item label="允许迟交">
-            <el-switch v-model="assignmentForm.allow_late" />
-          </el-form-item>
-        </div>
-        <el-form-item v-if="assignmentForm.allow_late" label="迟交规则">
-          <el-input v-model="assignmentForm.late_policy" />
-        </el-form-item>
-        <section class="evaluation-editor">
-          <div class="drawer-toolbar">
-            <div>
-              <strong>需提交文件</strong>
-              <span>{{ assignmentForm.submission_requirements.length }} 个提交项</span>
+        </section>
+        <section class="workflow-card assignment-description-card" aria-labelledby="assignment-description-title">
+          <div class="card-header">
+            <h2 id="assignment-description-title">作业说明</h2>
+            <el-tag effect="plain">Markdown</el-tag>
+          </div>
+          <MarkdownEditor v-if="teacherMarkdownDocument" :key="teacherMarkdownDocument.id" ref="teacherMarkdownEditor"
+            v-model="assignmentForm.description" :document-id="teacherMarkdownDocument.id" :initial-revision="teacherMarkdownDocument.revision"
+            :preview-source="assignmentFormMarkdown()" :filename="`${assignmentForm.code || 'assignment'}.md`" />
+          <el-alert v-else title="正在加载 Markdown 编辑器…" type="info" :closable="false" />
+        </section>
+        <section class="workflow-card" aria-labelledby="assignment-files-title">
+          <div class="card-header">
+            <h2 id="assignment-files-title">需提交文件</h2>
+            <div class="toolbar-actions">
+              <el-tag effect="plain">{{ assignmentForm.submission_requirements.length }} 个提交项</el-tag>
+              <el-tag :type="Math.abs(assignmentForm.submission_requirements.reduce((sum, item) => sum + (item.required ? Number(item.weight_percent ?? 0) : 0), 0) - 100) < 0.01 ? 'success' : 'danger'" effect="plain">权重合计 {{ assignmentForm.submission_requirements.reduce((sum, item) => sum + (item.required ? Number(item.weight_percent ?? 0) : 0), 0) }}%</el-tag>
+              <el-button :icon="CirclePlus" @click="openSubmissionRequirementDialog()">添加提交项</el-button>
             </div>
-            <el-button :icon="CirclePlus" @click="openSubmissionRequirementDialog()">添加提交项</el-button>
           </div>
           <el-table :data="assignmentForm.submission_requirements" row-key="key" empty-text="暂无提交项">
             <el-table-column prop="label" label="名称" min-width="130" />
@@ -3103,6 +3242,9 @@ onMounted(() => {
             <el-table-column label="必交" width="80">
               <template #default="{ row }">{{ row.required ? '是' : '否' }}</template>
             </el-table-column>
+            <el-table-column label="权重 / 满分" min-width="130">
+              <template #default="{ row }">{{ row.required ? `${row.weight_percent ?? 0}% / ${Number((assignmentForm.max_score * Number(row.weight_percent ?? 0) / 100).toFixed(2))}` : '不计分' }}</template>
+            </el-table-column>
             <el-table-column label="操作" width="94" class-name="operation-column">
               <template #default="{ $index }">
                 <el-button :icon="Edit" circle title="编辑" @click="openSubmissionRequirementDialog($index)" />
@@ -3111,13 +3253,13 @@ onMounted(() => {
             </el-table-column>
           </el-table>
         </section>
-        <section class="evaluation-editor">
-          <div class="drawer-toolbar">
-            <div>
-              <strong>程序评测</strong>
-              <span v-if="assignmentForm.program_evaluations.length">{{ assignmentForm.program_evaluations.length }} 个模块</span>
+        <section class="workflow-card" aria-labelledby="assignment-program-title">
+          <div class="card-header">
+            <h2 id="assignment-program-title">程序评测</h2>
+            <div class="toolbar-actions">
+              <el-tag effect="plain">{{ assignmentForm.program_evaluations.length }} 个模块</el-tag>
+              <el-button :icon="CirclePlus" @click="openProgramEvaluationDialog()">添加程序评测</el-button>
             </div>
-            <el-button :icon="CirclePlus" @click="openProgramEvaluationDialog()">添加程序评测</el-button>
           </div>
           <el-table v-if="assignmentForm.program_evaluations.length" :data="assignmentForm.program_evaluations" row-key="name">
             <el-table-column prop="name" label="模块" min-width="150" />
@@ -3137,14 +3279,15 @@ onMounted(() => {
               </template>
             </el-table-column>
           </el-table>
+          <el-empty v-else :image-size="56" description="未配置程序评测" />
         </section>
-        <section class="evaluation-editor">
-          <div class="drawer-toolbar">
-            <div>
-              <strong>AI 评测</strong>
-              <span v-if="assignmentForm.ai_evaluations.length">{{ assignmentForm.ai_evaluations.length }} 个模块</span>
+        <section class="workflow-card" aria-labelledby="assignment-ai-title">
+          <div class="card-header">
+            <h2 id="assignment-ai-title">AI 评测</h2>
+            <div class="toolbar-actions">
+              <el-tag effect="plain">{{ assignmentForm.ai_evaluations.length }} 个模块</el-tag>
+              <el-button :icon="CirclePlus" @click="openAiEvaluationDialog()">添加 AI 评测</el-button>
             </div>
-            <el-button :icon="CirclePlus" @click="openAiEvaluationDialog()">添加 AI 评测</el-button>
           </div>
           <el-table v-if="assignmentForm.ai_evaluations.length" :data="assignmentForm.ai_evaluations" row-key="name">
             <el-table-column prop="name" label="模块" min-width="150" />
@@ -3165,13 +3308,25 @@ onMounted(() => {
               </template>
             </el-table-column>
           </el-table>
+          <el-empty v-else :image-size="56" description="未配置 AI 评测" />
         </section>
       </el-form>
       <template #footer>
-        <el-button @click="assignmentDialogVisible = false">取消</el-button>
+        <el-button @click="closeTeacherMarkdownEditor(() => assignmentDialogVisible = false)">关闭</el-button>
         <el-button :icon="View" @click="openAssignmentPreview()">预览</el-button>
         <el-button :icon="Check" @click="saveAssignment('draft')">保存草稿</el-button>
         <el-button type="primary" :icon="DocumentAdd" @click="saveAssignment('published')">保存并发布</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="markdownDialogVisible" :title="`在线编辑 ${submittingRequirement?.label ?? 'Markdown 作业'}`" fullscreen class="assignment-editor-dialog student-markdown-dialog" :before-close="closeStudentMarkdownEditor" destroy-on-close>
+      <el-alert title="草稿会自动保存。完成编辑后，请回到作业页面点击“确认提交作业”。" type="info" :closable="false" show-icon />
+      <MarkdownEditor v-if="studentMarkdownDocument" :key="studentMarkdownDocument.id" ref="studentMarkdownEditor"
+        v-model="studentMarkdownContent" :document-id="studentMarkdownDocument.id" :initial-revision="studentMarkdownDocument.revision"
+        :filename="(expectedSubmissionName || 'report.md').replace('{extension}', '.md')" />
+      <template #footer>
+        <el-button v-if="submittingRequirement?.allowed_extensions.some(extension => extension !== '.md')" @click="uploadAlternativeFormat">上传其他格式</el-button>
+        <el-button type="primary" @click="closeStudentMarkdownEditor(() => markdownDialogVisible = false)">保存并完成编辑</el-button>
       </template>
     </el-dialog>
 
@@ -3185,10 +3340,6 @@ onMounted(() => {
           <span>大小上限</span>
           <strong>{{ submittingRequirement.max_size_mb }} MB</strong>
         </div>
-        <div>
-          <span>命名要求</span>
-          <strong>{{ expectedSubmissionName || submittingRequirement.filename_template }}</strong>
-        </div>
       </div>
       <input class="file-input" type="file" :accept="submittingRequirement?.allowed_extensions.join(',')" @change="handleSubmissionFileChange" />
       <template #footer>
@@ -3199,22 +3350,26 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="studentDialogVisible" :title="editingRosterId ? '编辑学生' : '新增学生'" width="500px">
+    <el-dialog v-model="studentDialogVisible" :title="editingRosterId ? '编辑学生' : '新增学生'" width="min(620px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
+        <section class="workflow-card">
+          <h2>学生身份</h2>
         <el-form-item label="真实姓名">
           <el-input v-model="rosterForm.student_name" />
         </el-form-item>
-        <div class="form-grid">
-          <el-form-item label="No.">
-            <el-input v-model="rosterForm.student_no" placeholder="06" />
-          </el-form-item>
           <el-form-item label="学号">
             <el-input v-model="rosterForm.student_number" />
           </el-form-item>
-        </div>
+        </section>
+        <section class="workflow-card">
+          <h2>名单信息</h2>
+          <el-form-item label="No.">
+            <el-input v-model="rosterForm.student_no" placeholder="06" />
+          </el-form-item>
         <el-form-item label="学生信息班级">
           <el-input v-model="rosterForm.source_class" />
         </el-form-item>
+        </section>
       </el-form>
       <template #footer>
         <el-button @click="studentDialogVisible = false">取消</el-button>
