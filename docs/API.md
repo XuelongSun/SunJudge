@@ -56,7 +56,7 @@ GET/POST `/admin/classes/{class_id}/assignments`；PATCH/DELETE `/admin/assignme
 - 提交项 key 同样为 1–40 位，同作业唯一；文件模板支持 `{student_id}`、`{student_no}`、`{name}`、`{assignment_code}`、`{extension}`；单项大小 0 < max_size_mb ≤ 64。
 - 当前代码支持 `.py/.md/.zip/.jpg/.png`；首期 PRD 只要求 `.py/.md`，生产作业请显式收窄白名单。ZIP/图片仅存储、预览或人工批改，Python 评测只跑 `.py`。
 - program_evaluations 指定提交项及 cases，每 case 传 args（shell 风格分词，但不经过 shell 执行）、expected_output、score_percent、timeout_seconds、is_hidden。当前没有 stdin 输入接口。
-- ai_evaluations 模块指定 name/input_file_key/score_percent/input/criteria_items，criteria_items 为 `[{"content":"论述完整","weight":100}]`；权重均须为正，程序+AI评分占比总和不能超过 100，剩余分数由教师判断。
+- ai_evaluations 模块指定 name/input_file_key/score_percent/input/criteria_items，criteria_items 为 `[{"content":"论述完整","weight":100}]`；权重均须为正。必交提交项权重合计100%，程序/AI模块按文件引用的占比必须匹配对应提交项权重，服务端校验并控制文件满分；不再按旧版“自动占比不足即随意留下人工余分”规则理解。
 - late_policy 保存说明文本，不能认为已实现自动迟交扣分。
 - 已发布作业有批改数据时，修改返回 409 `requires_reset_grading=true`；显式传 `reset_grading:true` 会清除既有批改并重排任务。删除作业会同时删除学生提交、对应文件与相关批改记录。调用前务必理解这些业务副作用。
 
@@ -96,3 +96,12 @@ GET `/admin/assignments/{assignment_id}/grades.csv` 返回 UTF-8 BOM CSV 附件�
 GET/PUT `/admin/llm-config`，仅教师自身。PUT 为 `{base_url,model,api_key,enabled,provider}`，base_url/model 必填，首次必须传 api_key，后续省略或空值保留旧 key。当前 provider 默认 deepseek，调用走兼容 chat/completions 协议，不因 provider 字段自动切换 SDK。
 
 响应 `{config}` 仅展示 `has_api_key`，不返回明文/密文。生产配置有 LLM_ENCRYPTION_KEY 时使用 Fernet 加密保存；旧明文需执行 `encrypt-llm-keys`。API 异常/JSON 解析失败留待人工处理。base_url 由教师配置，尚未对目标主机实施严格网络白名单，只应审批可信教师。
+
+## 在线Markdown及私有图片（当前版本）
+
+- POST `/markdown-documents`：JSON `{class_id,assignment_id,kind,item_key}`，kind为description或submission，返回`{document}`；教师新说明可以尚无assignment_id。
+- GET `/markdown-documents/{id}`读取本人草稿；PUT同路径传`{content,revision}`自动保存，版本冲突409，正文至多1MiB并受学生提交项限制。保存草稿不等于确认提交。
+- POST `/markdown-documents/{id}/images`：multipart file，仅PNG/JPEG，成功201 `{asset:{id,url,filename}}`。每图5MiB、1000万像素；每文档50张/50MiB。
+- GET `/assets/{id}/content`：登录且满足文档/快照访问权限后返回图片，Cache-Control为private,no-store。不能公开代理、跨账号缓存或直接暴露上传目录。
+- 学生确认整份提交会生成不可变.md快照及图片引用；教师只能读取已确认快照引用的报告图片。教师说明图需已保存并发布，且属于该班学生才可读取；管理员不自动绕过图片权限。
+- 程序评测仍只运行.py；AI以Pydantic验证逐rubric结构并重算汇总，只读文本，不识别图片。数据库与所有图片必须共同备份，导出的.md本身不包含图片二进制。

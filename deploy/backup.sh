@@ -12,6 +12,7 @@ mysqldump --single-transaction --quick --no-tablespaces sunjudge | gzip > "$stag
 tar -C /var/lib/sunjudge -czf "$staging/uploads.tar.gz" uploads
 gzip -t "$staging/database.sql.gz"
 tar -tzf "$staging/uploads.tar.gz" >/dev/null
+(cd "$staging" && sha256sum database.sql.gz uploads.tar.gz > SHA256SUMS)
 mv "$staging" "$backup_root/daily/$stamp"
 if [[ $(date -u +%u) == 7 ]]; then
     cp -a "$backup_root/daily/$stamp" "$backup_root/weekly/$stamp"

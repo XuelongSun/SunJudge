@@ -4,7 +4,7 @@ Flask + Vue 的教学作业平台，当前已完成 M1–M4：账号与审批、
 
 ## 文档入口
 
-- [生产部署步骤](docs/DEPLOYMENT.md)：Ubuntu、MySQL、Nginx、Gunicorn、Supervisor、HTTPS、备份/恢复/更新。
+- [生产部署步骤](docs/DEPLOYMENT.md)：当前图片版的新手20步部署、验收、备份、升级与故障处理（本地指导文件，按.gitignore不发布到Git）。
 - [API 调用文档](docs/API.md)及[全部路由索引](docs/API_REFERENCE.md)。
 - [腾讯云选型及现有域名配置](docs/CLOUD_AND_DOMAIN.md)。
 - [收束记录与生产验收清单](docs/RELEASE_CHECKLIST.md)。
@@ -47,5 +47,7 @@ npm run build
 routes 负责HTTP和权限入口；models 定义数据与序列化；services 封装名单、文件校验、评测、LLM与导出。学生用真实姓名及 教学班别名-两位No. 邀请码匹配名单，按姓名/长学号自动绑定多个班级；学生登录使用真实姓名或绑定编号。教师需审批，管理员不维护名单。
 
 当前自动批改使用进程内串行队列；生产仅配置一个Gunicorn worker，重启任务恢复和公开评测安全限制见部署指南。教师分数只有发布后学生可见，AI分数只是建议。CLI导出严格校验编号后提取短编号，只生成文本。
+
+Markdown在线草稿及图片元数据存数据库，图片位于UPLOAD_FOLDER/markdown-assets，通过/api/assets/鉴权读取。迁移后再使用图片功能，备份必须同时保留数据库及整个上传目录；不能把图片目录公开为图床。图片当前仅展示，不参与DeepSeek视觉评分。
 
 首期规范要求.py/.md；现有代码还保留ZIP/图片提交能力，生产作业显式限定文件白名单。生产环境要求HTTPS、强Session密钥、可信Origin和LLM加密key；旧教师明文key需转换。未进行实际云端部署或100并发压测。
