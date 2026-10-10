@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import event
+from sqlalchemy.dialects import mysql
 
 from app.extensions import db
 from app.models import Assignment, ClassRoster, Course, CourseClass, CourseMember, Submission, User
@@ -94,6 +99,55 @@ def _assignment_payload(status: str = Assignment.STATUS_DRAFT):
             }
         ],
     }
+
+
+@pytest.mark.parametrize("student_no", ["00", "06"])
+def test_student_assignment_list_uses_mysql_compatible_deadline_order(client, student_no):
+    class_id, _, student_id, _ = _create_class_with_student(client.application)
+    with client.application.app_context():
+        student = db.session.get(User, student_id)
+        roster = ClassRoster.query.filter_by(class_id=class_id, matched_user_id=student_id).one()
+        student.student_no = roster.student_no = student_no
+        student.student_id = roster.student_id = f"OS202601-{student_no}"
+        course_class = db.session.get(CourseClass, class_id)
+        work = []
+        # Insert out of deadline order, including ties and multiple missing deadlines.
+        for code, deadline in [
+            ("none1", None),
+            ("late", datetime(2027, 2, 1, tzinfo=UTC)),
+            ("early1", datetime(2027, 1, 1, tzinfo=UTC)),
+            ("none2", None),
+            ("early2", datetime(2027, 1, 1, tzinfo=UTC)),
+        ]:
+            work.append(Assignment(
+                course_id=course_class.course_id, class_id=class_id,
+                title=code, code=code, type=Assignment.TYPE_HOMEWORK,
+                status=Assignment.STATUS_PUBLISHED, deadline=deadline,
+                file_rules_json=_assignment_payload()["file_rules"],
+            ))
+        db.session.add_all(work)
+        db.session.commit()
+        engine = db.engine
+
+    assert _login(client, f"OS202601-{student_no}").status_code == 200
+    queries = []
+
+    def capture_mysql_sql(conn, clauseelement, multiparams, params, execution_options):
+        queries.append(str(clauseelement.compile(dialect=mysql.dialect())))
+
+    event.listen(engine, "before_execute", capture_mysql_sql)
+    try:
+        response = client.get(f"/api/classes/{class_id}/assignments")
+    finally:
+        event.remove(engine, "before_execute", capture_mysql_sql)
+
+    assert response.status_code == 200
+    assert [item["code"] for item in response.json["assignments"]] == [
+        "early2", "early1", "late", "none2", "none1",
+    ]
+    listing_sql = next(sql for sql in queries if "ORDER BY assignments.deadline" in sql)
+    assert "NULLS LAST" not in listing_sql.upper()
+    assert "assignments.deadline IS NULL" in listing_sql
 
 
 def test_teacher_can_save_draft_and_publish_assignment(client):

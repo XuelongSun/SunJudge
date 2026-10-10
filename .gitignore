@@ -35,11 +35,14 @@ learning_notes.md
 re-implement.md
 typescript_tutorial.md
 vue_tutorial.md
+maintain.md
 
 # Local deployment/release guidance (keep runnable deploy/ configuration).
+/deploy_learning.md
 /docs/DEPLOYMENT.md
 /docs/CLOUD_AND_DOMAIN.md
 /docs/RELEASE_CHECKLIST.md
+/docs/MAINTENANCE.md
 
 *.xlsx
 

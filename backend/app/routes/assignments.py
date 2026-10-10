@@ -603,7 +603,8 @@ def list_student_assignments(class_id: int):
         return jsonify({"message": "Teaching class not found or not joined."}), HTTPStatus.NOT_FOUND
     assignments = (
         Assignment.query.filter_by(class_id=course_class.id, status=Assignment.STATUS_PUBLISHED)
-        .order_by(Assignment.deadline.asc().nullslast(), Assignment.id.desc())
+        # MySQL has no NULLS LAST syntax; sort missing deadlines after dated work.
+        .order_by(Assignment.deadline.is_(None), Assignment.deadline.asc(), Assignment.id.desc())
         .all()
     )
     return jsonify(
