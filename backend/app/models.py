@@ -114,7 +114,7 @@ class CourseClass(db.Model):
             {
                 "invite_code": self.invite_code,
                 "invite_enabled": self.invite_enabled,
-                "roster_count": len(self.roster_entries),
+                "roster_count": sum(not entry.is_test_student for entry in self.roster_entries),
                 "assignment_count": assignment_count_for_class(self.id),
             }
         )
@@ -123,6 +123,10 @@ class CourseClass(db.Model):
 
 class ClassRoster(db.Model):
     __tablename__ = "class_rosters"
+
+    @property
+    def is_test_student(self) -> bool:
+        return self.student_id.rsplit("-", 1)[-1] == "00"
 
     STATUS_IMPORTED = "imported"
     STATUS_REGISTERED = "registered"
@@ -242,18 +246,21 @@ class Assignment(db.Model):
             "published_at": self.published_at.isoformat() if self.published_at else None,
         }
         if include_counts:
-            expected_count = ClassRoster.query.filter_by(class_id=self.class_id).count()
+            roster = ClassRoster.query.filter_by(class_id=self.class_id).all()
+            roster = [entry for entry in roster if not entry.is_test_student]
+            expected_count = len(roster)
+            counted_ids = {entry.matched_user_id for entry in roster if entry.matched_user_id}
             required_keys = {
                 str(item.get("key"))
                 for item in self.submission_requirements_json or _legacy_submission_requirements(self.file_rules_json)
                 if item.get("required", True)
             }
-            submitted_user_ids = _completed_student_user_ids(self.id, required_keys)
-            feedback_count = AssignmentGrade.query.filter_by(assignment_id=self.id, status=GradingResult.STATUS_PUBLISHED).count()
+            submitted_user_ids = _completed_student_user_ids(self.id, required_keys) & counted_ids
+            feedback_count = AssignmentGrade.query.filter_by(assignment_id=self.id, status=GradingResult.STATUS_PUBLISHED).filter(AssignmentGrade.student_user_id.in_(counted_ids)).count()
             data["expected_submission_count"] = expected_count
             data["submission_count"] = len(submitted_user_ids)
             data["feedback_count"] = feedback_count
-            data["latest_submission_count"] = len(self.submissions)
+            data["latest_submission_count"] = sum(submission.student_user_id in counted_ids for submission in self.submissions)
         from .services.assignment_weights import effective_requirements
         data["submission_requirements"] = effective_requirements(data["submission_requirements"], self.program_evaluations_json or [], self.ai_evaluations_json or [])
         if student_user_id is not None:
@@ -553,7 +560,9 @@ class MarkdownAsset(db.Model):
     __tablename__ = "markdown_assets"
 
     id = db.Column(db.String(32), primary_key=True)
-    document_id = db.Column(db.Integer, db.ForeignKey("markdown_documents.id"), nullable=False, index=True)
+    document_id = db.Column(db.Integer, db.ForeignKey("markdown_documents.id"), nullable=True, index=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+    student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     original_filename = db.Column(db.String(255), nullable=False)
     file_path = db.Column(db.String(500), nullable=False)
     mime_type = db.Column(db.String(40), nullable=False)

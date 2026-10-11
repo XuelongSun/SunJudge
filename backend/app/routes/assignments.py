@@ -7,6 +7,7 @@ import re
 import math
 import shlex
 from uuid import uuid4
+from copy import deepcopy
 
 from flask import Blueprint, Response, current_app, jsonify, request, send_file
 from flask_login import current_user, login_required
@@ -156,6 +157,48 @@ def create_assignment(class_id: int):
     return jsonify({"assignment": assignment.to_dict(include_counts=True)}), HTTPStatus.CREATED
 
 
+@assignments_bp.post("/admin/assignments/<int:assignment_id>/copy")
+@login_required
+@roles_required(User.ROLE_TEACHER)
+def copy_assignment(assignment_id: int):
+    source = _get_managed_assignment_or_404(assignment_id)
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify(message="请求必须是 JSON 对象。"), 400
+    target_id = payload.get("class_id")
+    target = _get_managed_class_or_404(target_id) if type(target_id) is int else None
+    if not source or not target:
+        return jsonify(message="作业或目标教学班不存在或无权访问。"), 404
+    if current_user.teacher_status != User.TEACHER_STATUS_APPROVED:
+        return jsonify(message="教师账号尚未审批。"), 403
+    if target.id == source.class_id:
+        return jsonify(message="请选择另一个教学班。"), 400
+    code = str(payload.get("code") or source.code).strip()
+    if not CODE_PATTERN.fullmatch(code):
+        return jsonify(message="作业代码格式无效。"), 400
+    if Assignment.query.filter_by(class_id=target.id, code=code).first():
+        return jsonify(message="目标班级已有相同代码，请修改迁移后的作业代码。"), 409
+    fields = ("title", "type", "description", "description_format", "deadline", "allow_late", "late_policy",
+              "max_score", "file_rules_json", "submission_requirements_json", "rubric_json", "rubric_format",
+              "program_evaluations_json", "ai_evaluations_json")
+    assignment = Assignment(course_id=target.course_id, class_id=target.id, code=code,
+                            status=Assignment.STATUS_DRAFT, **{key: deepcopy(getattr(source, key)) for key in fields})
+    db.session.add(assignment)
+    db.session.flush()
+    document = MarkdownDocument(owner_id=current_user.id, class_id=target.id, assignment_id=assignment.id,
+                                kind="description", item_key="", content=assignment.description or "")
+    db.session.add(document)
+    try:
+        validate_document_images(document, document.content)
+    except FileValidationError as exc:
+        db.session.rollback()
+        return jsonify(message=str(exc)), 400
+    db.session.add(AuditLog(actor_id=current_user.id, action="assignment_copied", target_type="assignment",
+                           target_id=assignment.id, payload_json={"source_id": source.id, "class_id": target.id}))
+    db.session.commit()
+    return jsonify(assignment=assignment.to_dict(include_counts=True)), 201
+
+
 @assignments_bp.patch("/admin/assignments/<int:assignment_id>")
 @login_required
 @roles_required(User.ROLE_TEACHER)
@@ -274,6 +317,7 @@ def list_assignment_submissions(assignment_id: int):
         return jsonify({"message": "Assignment not found or not manageable."}), HTTPStatus.NOT_FOUND
     roster = ClassRoster.query.filter_by(class_id=assignment.class_id).order_by(ClassRoster.student_no.asc()).all()
     rows = []
+    test_rows = []
     requirements = assignment.submission_requirements_json or []
     for entry in roster:
         latest_submissions = []
@@ -302,7 +346,7 @@ def list_assignment_submissions(assignment_id: int):
             student_state = "read" if read else "unread"
         teacher_state = _teacher_grading_state(assignment_grade, latest_submissions, assignment)
         deadline_state = student_deadline_state(assignment, entry.matched_user_id, assignment_grade, requirements)
-        rows.append(
+        (test_rows if entry.is_test_student else rows).append(
             {
                 "roster": entry.to_dict(),
                 "submission": latest.to_dict(include_private=True) if latest else None,
@@ -317,7 +361,7 @@ def list_assignment_submissions(assignment_id: int):
             }
         )
     gradebook = build_assignment_gradebook(assignment)
-    return jsonify({"assignment": assignment.to_dict(include_counts=True), "analysis": gradebook["summary"], "submissions": rows})
+    return jsonify({"assignment": assignment.to_dict(include_counts=True), "analysis": gradebook["summary"], "submissions": rows, "test_submissions": test_rows})
 
 
 
@@ -778,10 +822,15 @@ def confirm_assignment_submission(assignment_id: int):
                 raise FileValidationError(error)
             validation = validate_saved_submission_file(target, submission.original_filename, requirement, validation_context)
             previous = submission.validation_result_json or {}
+            document = None
             if previous.get("markdown_document_id"):
                 document = db.session.get(MarkdownDocument, previous["markdown_document_id"])
                 if not document or document.assignment_id != assignment.id or document.owner_id != current_user.id or document.item_key != submission.submission_item_key:
                     raise FileValidationError("Markdown 文档归属不匹配。")
+            if target.suffix.lower() == ".md":
+                # Local .md uploads can reference library images even before opening the editor.
+                document = document or MarkdownDocument(owner_id=current_user.id, class_id=assignment.class_id,
+                                                        assignment_id=assignment.id, kind="submission", item_key=submission.submission_item_key)
                 previous = {**previous, "markdown_asset_ids": validate_document_images(document, target.read_text(encoding="utf-8"))}
             submission.validation_result_json = {**validation.to_dict(), **{key: value for key, value in previous.items() if key.startswith("markdown_")}}
             submission.file_size = validation.size
@@ -1299,7 +1348,7 @@ def _parse_datetime(value: object) -> datetime | None:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    return parsed.astimezone(UTC)
 
 
 def _as_utc(value: datetime) -> datetime:

@@ -212,7 +212,7 @@ def test_failed_other_file_rolls_back_generated_snapshot_and_revision(client, co
     assert list(context["root"].rglob("*.md")) == []
 
 
-def test_unused_cleanup_keeps_old_submission_images(client, context):
+def test_unused_cleanup_keeps_student_library_and_old_submission_images(client, context):
     login(client, "OS202601-06")
     document = open_draft(client, context)
     used = upload_image(client, document)
@@ -226,10 +226,12 @@ def test_unused_cleanup_keeps_old_submission_images(client, context):
         db.session.commit()
     runner = client.application.test_cli_runner()
     result = runner.invoke(args=["cleanup-markdown-assets"])
-    assert result.exit_code == 0 and "Unused candidates: 1" in result.output
+    assert result.exit_code == 0 and "Unused candidates: 0" in result.output
     assert client.get(unused["url"]).status_code == 200
     result = runner.invoke(args=["cleanup-markdown-assets", "--apply"])
-    assert result.exit_code == 0 and "Deleted: 1" in result.output
+    assert result.exit_code == 0 and "Deleted: 0" in result.output
+    assert client.get(unused["url"]).status_code == 200
+    assert client.delete(f"/api/student/images/{unused['id']}").status_code == 200
     assert client.get(unused["url"]).status_code == 404
     assert client.get(used["url"]).status_code == 200
 

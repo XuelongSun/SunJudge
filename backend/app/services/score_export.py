@@ -18,7 +18,7 @@ SCORE_FIELD_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,40}$")
 
 def build_assignment_gradebook(assignment: Assignment) -> dict[str, Any]:
     roster = ClassRoster.query.filter_by(class_id=assignment.class_id).order_by(ClassRoster.student_no.asc()).all()
-    rows = [_build_grade_row(assignment, entry) for entry in roster]
+    rows = [_build_grade_row(assignment, entry) for entry in roster if not entry.is_test_student]
     return {"summary": _summarize_rows(assignment, rows), "rows": rows}
 
 

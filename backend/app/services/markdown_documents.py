@@ -67,12 +67,19 @@ def image_sources(content: str) -> list[str]:
 
 def validate_document_images(document: MarkdownDocument, content: str) -> list[str]:
     ids = []
+    sizes = {}
     for source in image_sources(content):
         match = ASSET_URL.fullmatch(source)
         asset = db.session.get(MarkdownAsset, match[1]) if match else None
-        if not asset or asset.document_id != document.id or not asset_path(asset).is_file():
+        owned = asset and (asset.teacher_id == document.owner_id if document.kind == "description" else
+                          asset.teacher_id is None and (asset.student_user_id == document.owner_id or
+                          (asset.student_user_id is None and asset.document_id == document.id)))
+        if not owned or not asset_path(asset).is_file():
             raise FileValidationError("图片未上传、已丢失或不属于当前文档，请使用“插入图片”重新上传。")
         ids.append(asset.id)
+        sizes[asset.id] = asset.file_size
+    if document.kind == "submission" and (len(sizes) > 50 or sum(sizes.values()) > MAX_DOCUMENT_IMAGE_BYTES):
+        raise FileValidationError("每份报告最多引用 50 张图片，总图片大小不超过 50 MB。")
     return sorted(set(ids))
 
 
@@ -84,15 +91,18 @@ def asset_path(asset: MarkdownAsset) -> Path:
     return target
 
 
-def create_image(document: MarkdownDocument, uploaded: FileStorage) -> MarkdownAsset:
+def create_image(document: MarkdownDocument | None, uploaded: FileStorage, *, teacher_id: int | None = None, student_user_id: int | None = None) -> MarkdownAsset:
+    teacher_id = document.owner_id if document and document.kind == "description" else teacher_id
+    student_user_id = document.owner_id if document and document.kind == "submission" else student_user_id
     if Path(uploaded.filename or "").suffix.lower() not in {".png", ".jpg", ".jpeg"}:
         raise FileValidationError("仅支持 PNG、JPEG 图片。")
     raw = uploaded.stream.read(MAX_IMAGE_BYTES + 1)
     if not raw or len(raw) > MAX_IMAGE_BYTES:
         raise FileValidationError("单张图片必须非空且不超过 5 MB。")
-    existing = document.assets
-    if len(existing) >= 50 or sum(asset.file_size for asset in existing) + len(raw) > MAX_DOCUMENT_IMAGE_BYTES:
-        raise FileValidationError("每份文档最多 50 张图片，总图片大小不超过 50 MB。")
+    existing = MarkdownAsset.query.filter_by(**({"teacher_id": teacher_id} if teacher_id else {"student_user_id": student_user_id})).all()
+    count_limit, byte_limit = 1000, 500 * 1024 * 1024
+    if len(existing) >= count_limit or sum(asset.file_size for asset in existing) + len(raw) > byte_limit:
+        raise FileValidationError(f"图片数量或容量已达上限（{count_limit} 张 / {byte_limit // 1024 // 1024} MB）。")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -111,12 +121,14 @@ def create_image(document: MarkdownDocument, uploaded: FileStorage) -> MarkdownA
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise FileValidationError("图片损坏或格式无效。") from exc
     encoded = output.getvalue()
-    if len(encoded) > MAX_IMAGE_BYTES or sum(asset.file_size for asset in existing) + len(encoded) > MAX_DOCUMENT_IMAGE_BYTES:
+    if len(encoded) > MAX_IMAGE_BYTES or sum(asset.file_size for asset in existing) + len(encoded) > byte_limit:
         raise FileValidationError("图片解码后超过大小限制。")
     key = uuid4().hex
     extension = ".png" if fmt == "PNG" else ".jpg"
-    asset = MarkdownAsset(id=key, document_id=document.id, original_filename=Path(uploaded.filename).name[:255],
-                          file_path=f"markdown-assets/{document.id}/{key}{extension}",
+    owner_folder = f"teacher-{teacher_id}" if teacher_id else f"student-{student_user_id}"
+    asset = MarkdownAsset(id=key, document_id=document.id if document else None, teacher_id=teacher_id, student_user_id=student_user_id,
+                          original_filename=Path(uploaded.filename).name[:255],
+                          file_path=f"markdown-assets/{owner_folder}/{key}{extension}",
                           mime_type="image/png" if fmt == "PNG" else "image/jpeg", file_size=len(encoded))
     target = asset_path(asset)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -130,7 +142,32 @@ def create_image(document: MarkdownDocument, uploaded: FileStorage) -> MarkdownA
 
 
 def can_read_asset(asset: MarkdownAsset, user: User) -> bool:
+    if asset.student_user_id:
+        if user.id == asset.student_user_id and user.role == User.ROLE_STUDENT:
+            return True
+        if user.role != User.ROLE_TEACHER:
+            return False
+        # Reuse is private: only a confirmed snapshot grants its own teacher access.
+        submissions = Submission.query.join(Assignment).filter(
+            Submission.student_user_id == asset.student_user_id,
+            Submission.status.in_([Submission.STATUS_SUBMITTED, Submission.STATUS_LATE]),
+            Assignment.course.has(teacher_id=user.id)).all()
+        return any(asset.id in (submission.validation_result_json or {}).get("markdown_asset_ids", [])
+                   for submission in submissions)
+    if asset.teacher_id:
+        if user.id == asset.teacher_id and user.role == User.ROLE_TEACHER:
+            return True
+        if user.role != User.ROLE_STUDENT:
+            return False
+        # A shared image is visible only through a published description in the student's class.
+        url = f"/api/assets/{asset.id}/content"
+        assignments = Assignment.query.join(CourseClass).join(CourseMember, CourseMember.class_id == CourseClass.id).filter(
+            Assignment.status == Assignment.STATUS_PUBLISHED, CourseMember.user_id == user.id,
+            CourseMember.role == User.ROLE_STUDENT, Assignment.description.contains(url)).all()
+        return any(url in image_sources(assignment.description or "") for assignment in assignments)
     document = asset.document
+    if not document:
+        return False
     try:
         require_document_owner(document, user)
         return True
@@ -156,6 +193,9 @@ def can_read_asset(asset: MarkdownAsset, user: User) -> bool:
 def bind_description_document(assignment: Assignment, payload: dict, user: User):
     document_id = payload.get("markdown_document_id")
     if document_id is None:
+        # API callers may omit the editor's draft ID, but must still own every image.
+        document = MarkdownDocument(owner_id=user.id, class_id=assignment.class_id, kind="description")
+        validate_document_images(document, assignment.description or "")
         return
     document = db.session.get(MarkdownDocument, document_id) if isinstance(document_id, int) else None
     if not document:
@@ -210,4 +250,12 @@ def unused_image_assets(days: int = 7) -> list[MarkdownAsset]:
     for submission in Submission.query.all():
         used.update((submission.validation_result_json or {}).get("markdown_asset_ids", []))
     cutoff = utc_now() - timedelta(days=max(1, days))
-    return [asset for asset in MarkdownAsset.query.filter(MarkdownAsset.created_at < cutoff).all() if asset.id not in used]
+    return [asset for asset in MarkdownAsset.query.filter(MarkdownAsset.created_at < cutoff, MarkdownAsset.teacher_id.is_(None), MarkdownAsset.student_user_id.is_(None)).all() if asset.id not in used]
+
+
+def image_is_referenced(asset: MarkdownAsset) -> bool:
+    url = f"/api/assets/{asset.id}/content"
+    return (any(url in image_sources(document.content) for document in MarkdownDocument.query.filter(MarkdownDocument.content.contains(url)).all())
+            or any(url in image_sources(assignment.description or "") for assignment in Assignment.query.filter(Assignment.description.contains(url)).all())
+            or any(asset.id in (submission.validation_result_json or {}).get("markdown_asset_ids", [])
+                   for submission in Submission.query.all()))

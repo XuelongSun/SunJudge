@@ -346,7 +346,20 @@ export interface MarkdownDocument extends MarkdownDraftSummary {
   item_key: string
 }
 
+export interface LibraryImage { id: string; url: string; filename: string; file_size: number }
+
 export const api = {
+  listLibraryImages: (role: 'teacher' | 'student') => request<{ assets: LibraryImage[] }>(`/api/${role}/images`),
+  deleteLibraryImage: (role: 'teacher' | 'student', id: string) => request<{ message: string }>(`/api/${role}/images/${id}`, { method: 'DELETE' }),
+  uploadLibraryImage: (role: 'teacher' | 'student', file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<{ asset: LibraryImage }>(`/api/${role}/images`, { method: 'POST', body })
+  },
+  copyAssignment: (id: number, classId: number, code: string) =>
+    request<{ assignment: Assignment }>(`/api/admin/assignments/${id}/copy`, { method: 'POST', body: JSON.stringify({ class_id: classId, code }) }),
+  previewRosterExcel: (formData: FormData) =>
+    request<{ student_count: number }>('/api/admin/classes/import-excel', { method: 'POST', body: formData }),
   openMarkdownDocument: (payload: { class_id: number; assignment_id?: number; kind: 'description' | 'submission'; item_key?: string }) =>
     request<{ document: MarkdownDocument }>('/api/markdown-documents', { method: 'POST', body: JSON.stringify(payload) }),
   saveMarkdownDocument: (id: number, content: string, revision: number) =>
@@ -395,7 +408,7 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   importRosterExcel: (formData: FormData) =>
-    request<{ course_id: number; class_id: number; imported_count: number; updated_count: number }>(
+    request<{ course_id: number; class_id: number; imported_count: number; updated_count: number; removed_count: number; preserved_registered_count: number }>(
       '/api/admin/classes/import-excel',
       {
         method: 'POST',
@@ -442,7 +455,7 @@ export const api = {
       method: 'DELETE'
     }),
   listAssignmentSubmissions: (assignmentId: number) =>
-    request<{ assignment: Assignment; analysis: AssignmentGradeAnalysis; submissions: AssignmentSubmissionRow[] }>(`/api/admin/assignments/${assignmentId}/submissions`),
+    request<{ assignment: Assignment; analysis: AssignmentGradeAnalysis; submissions: AssignmentSubmissionRow[]; test_submissions: AssignmentSubmissionRow[] }>(`/api/admin/assignments/${assignmentId}/submissions`),
   listAssignmentGrades: (assignmentId: number) =>
     request<{ assignment: Assignment; class: AdminClass; analysis: AssignmentGradeAnalysis; rows: Array<Record<string, unknown>> }>(`/api/admin/assignments/${assignmentId}/grades`),
   assignmentGradesCsvUrl: (assignmentId: number) => `/api/admin/assignments/${assignmentId}/grades.csv`,

@@ -8,10 +8,74 @@ from sqlalchemy.exc import IntegrityError
 from ..extensions import db
 from ..models import Assignment, CourseClass, MarkdownAsset, MarkdownDocument, User, utc_now
 from ..services.file_validation import FileValidationError
-from ..services.markdown_documents import asset_path, can_read_asset, create_image, require_document_owner, require_student_editable
+from ..services.markdown_documents import asset_path, can_read_asset, create_image, image_is_referenced, require_document_owner, require_student_editable
+from .permissions import roles_required
 
 
 markdown_bp = Blueprint("markdown", __name__)
+
+
+def library_scope():
+    role = User.ROLE_STUDENT if request.path.startswith("/api/student/") else User.ROLE_TEACHER
+    if current_user.role != role or (role == User.ROLE_TEACHER and current_user.teacher_status != User.TEACHER_STATUS_APPROVED):
+        abort(403)
+    return {"student_user_id" if role == User.ROLE_STUDENT else "teacher_id": current_user.id}
+
+
+def asset_info(asset):
+    return {"id": asset.id, "url": f"/api/assets/{asset.id}/content", "filename": asset.original_filename,
+            "file_size": asset.file_size}
+
+
+@markdown_bp.get("/teacher/images")
+@markdown_bp.get("/student/images")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_STUDENT)
+def list_teacher_images():
+    scope = library_scope()
+    assets = MarkdownAsset.query.filter_by(**scope).order_by(MarkdownAsset.created_at.desc()).all()
+    return jsonify(assets=[asset_info(asset) for asset in assets])
+
+
+@markdown_bp.post("/teacher/images")
+@markdown_bp.post("/student/images")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_STUDENT)
+def upload_teacher_image():
+    scope = library_scope()
+    uploaded = request.files.get("file")
+    if not uploaded:
+        return jsonify(message="请选择图片。"), 400
+    # Serialize uploads across the owner's documents and library.
+    db.session.execute(update(User).where(User.id == current_user.id).values(username=User.username))
+    try:
+        asset = create_image(None, uploaded, **scope)
+    except FileValidationError as exc:
+        db.session.rollback()
+        return jsonify(message=str(exc)), 400
+    try:
+        db.session.commit()
+    except Exception:
+        asset_path(asset).unlink(missing_ok=True)
+        db.session.rollback()
+        raise
+    return jsonify(asset=asset_info(asset)), 201
+
+
+@markdown_bp.delete("/teacher/images/<asset_id>")
+@markdown_bp.delete("/student/images/<asset_id>")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_STUDENT)
+def delete_teacher_image(asset_id):
+    scope = library_scope()
+    asset = MarkdownAsset.query.filter_by(id=asset_id, **scope).first_or_404()
+    if image_is_referenced(asset):
+        return jsonify(message="图片仍被作业说明或草稿引用，请移除引用后再删除，避免历史作业图片丢失。"), 409
+    path = asset_path(asset)
+    db.session.delete(asset)
+    db.session.commit()
+    path.unlink(missing_ok=True)
+    return jsonify(message="图片已删除。")
 
 
 def owned_document(document_id, *, write=False):
@@ -122,6 +186,7 @@ def upload_image(document_id):
     if not uploaded:
         return jsonify(message="请选择图片。"), 400
     # Serialize quota checks for the same document, including SQLite writers.
+    db.session.execute(update(User).where(User.id == current_user.id).values(username=User.username))
     db.session.execute(update(MarkdownDocument).where(MarkdownDocument.id == document.id).values(updated_at=utc_now()))
     db.session.expire(document, ["assets"])
     try:

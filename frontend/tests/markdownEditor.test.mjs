@@ -27,6 +27,7 @@ function mountEditor(api) {
   mod.paths = Module._nodeModulePaths(path.dirname(filename))
   const originalRequire = mod.require.bind(mod)
   mod.require = name => {
+    if (name === './ImageLibrary.vue') return { render: () => null }
     if (name === '../api') return { api }
     if (name === '../markdown') return { renderContent: value => value }
     if (name === '../reportTemplates') return { markdownText: value => value }
@@ -120,6 +121,24 @@ test('failed image upload leaves the document intact and shows an error', async 
     await ui.editor.value.flush()
     assert.equal(ui.state.content, '初始正文')
     assert.match(ui.errors[0], /图片上传失败.*图片损坏/)
+  } finally { ui.destroy() }
+})
+
+test('library insertion reuses the existing URL and saves without another image upload', async () => {
+  const saves = []
+  const ui = mountEditor({
+    uploadMarkdownImage: async () => { throw new Error('must reuse the existing image') },
+    saveMarkdownDocument: async (id, content, revision) => {
+      saves.push(content)
+      return { document: { revision: revision + 1 } }
+    }
+  })
+  try {
+    ui.editor.value.$.setupState.insertLibraryImage({ filename: '共享图.png', url: '/api/assets/shared/content' })
+    await nextTick()
+    await ui.editor.value.flush()
+    assert.equal(saves.at(-1), '初始正文![共享图.png](/api/assets/shared/content)')
+    assert.deepEqual(ui.errors, [])
   } finally { ui.destroy() }
 })
 

@@ -4,6 +4,8 @@ import { ElMessage } from 'element-plus'
 import { api } from '../api'
 import { renderContent } from '../markdown'
 import { markdownText } from '../reportTemplates'
+import ImageLibrary from './ImageLibrary.vue'
+import type { LibraryImage } from '../api'
 
 const props = defineProps<{
   modelValue: string
@@ -11,6 +13,7 @@ const props = defineProps<{
   initialRevision: number
   filename?: string
   previewSource?: string
+  libraryRole?: 'teacher' | 'student'
 }>()
 const emit = defineEmits<{
   'update:modelValue': [value: string]
@@ -19,6 +22,16 @@ const emit = defineEmits<{
 const textarea = ref<HTMLTextAreaElement>()
 const imageInput = ref<HTMLInputElement>()
 const markdownInput = ref<HTMLInputElement>()
+const libraryVisible = ref(false)
+function insertLibraryImage(image: LibraryImage) {
+  const editor = textarea.value
+  const start = editor?.selectionStart ?? props.modelValue.length
+  const end = editor?.selectionEnd ?? start
+  const text = `![${markdownText(image.filename)}](${image.url})`
+  emit('update:modelValue', props.modelValue.slice(0, start) + text + props.modelValue.slice(end))
+  libraryVisible.value = false
+  void nextTick(() => { editor?.focus(); editor?.setSelectionRange(start + text.length, start + text.length) })
+}
 const saving = ref(false)
 const uploading = ref(0)
 const saveError = ref('')
@@ -154,6 +167,7 @@ async function saveNow() {
     <div class="markdown-editor-toolbar">
       <div class="toolbar-actions markdown-editor-buttons">
         <el-button type="primary" :loading="uploading > 0" @click="imageInput?.click()">插入图片</el-button>
+        <el-button v-if="libraryRole" @click="libraryVisible = true">从图片库选择</el-button>
         <el-button @click="markdownInput?.click()">导入 .md</el-button>
         <el-button @click="downloadMarkdown">下载 .md</el-button>
         <el-button :loading="saving" @click="saveNow">保存草稿</el-button>
@@ -163,6 +177,9 @@ async function saveNow() {
     <p class="muted-line">支持粘贴截图、拖拽图片（PNG/JPEG，单张 ≤ 5 MB）。草稿自动保存，保存不代表提交或发布。</p>
     <input ref="imageInput" type="file" accept="image/png,image/jpeg" multiple hidden @change="selectImages" />
     <input ref="markdownInput" type="file" accept=".md" hidden @change="importMarkdown" />
+    <el-dialog v-model="libraryVisible" title="我的图片库" width="min(900px, 94vw)" append-to-body destroy-on-close>
+      <ImageLibrary v-if="libraryVisible && libraryRole" :role="libraryRole" selectable @select="insertLibraryImage" />
+    </el-dialog>
     <div class="markdown-edit-grid">
       <label class="markdown-source-panel">
         <textarea ref="textarea" :value="modelValue" spellcheck="false" aria-label="Markdown 正文" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)" @paste="pasteImages" @keydown.ctrl.s.prevent="saveNow" @keydown.meta.s.prevent="saveNow" />

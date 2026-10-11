@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { homeworkMarkdown, feedbackMarkdown, reportDate } from './reportTemplates'
+import { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput } from './reportTemplates'
 import { aiResultRows } from './gradingPresentation'
 import { progressPercent, filenamePreview, insertAtSelection } from './presentation'
 import ProgressCard from './components/ProgressCard.vue'
 import { renderContent } from './markdown'
 import MarkdownEditor from './components/MarkdownEditor.vue'
+import ImageLibrary from './components/ImageLibrary.vue'
 import type { MarkdownDocument } from './api'
 import 'highlight.js/styles/github.css'
 import 'katex/dist/katex.min.css'
@@ -13,6 +14,7 @@ import {
   Check,
   CirclePlus,
   Close,
+  CopyDocument,
   Delete,
   DocumentAdd,
   Download,
@@ -89,6 +91,7 @@ const filenameSelection = reactive({ start: 0, end: 0 })
 const managedAssignments = ref<Assignment[]>([])
 const studentAssignments = ref<Assignment[]>([])
 const submissionRows = ref<AssignmentSubmissionRow[]>([])
+const testSubmissionRows = ref<AssignmentSubmissionRow[]>([])
 const gradeAnalysis = ref<AssignmentGradeAnalysis | null>(null)
 const selectedAssignmentId = ref<number | undefined>()
 const selectedStudentAssignmentId = ref<number | undefined>()
@@ -106,6 +109,34 @@ const theme = ref<'light' | 'dark'>('light')
 
 const classDialogVisible = ref(false)
 const importDialogVisible = ref(false)
+const rosterInput = ref<HTMLInputElement>()
+const submissionFileInput = ref<HTMLInputElement>()
+const parsedStudentCount = ref(0)
+const imageLibraryVisible = ref(false)
+const copyDialogVisible = ref(false)
+const copyingAssignment = ref<Assignment | null>(null)
+const copyClassId = ref<number>()
+const copyCode = ref('')
+const copyLoading = ref(false)
+
+function deadlinePayload() { return deadlineFromInput(assignmentForm.deadline) }
+function openCopyAssignment(assignment: Assignment) {
+  copyingAssignment.value = assignment
+  copyClassId.value = undefined
+  copyCode.value = assignment.code
+  copyDialogVisible.value = true
+}
+async function copyAssignmentSettings() {
+  if (!copyingAssignment.value || !copyClassId.value) return
+  copyLoading.value = true
+  try {
+    await api.copyAssignment(copyingAssignment.value.id, copyClassId.value, copyCode.value)
+    copyDialogVisible.value = false
+    ElMessage.success('已迁移为目标班级的草稿，请检查截止时间和设置后发布')
+    await loadTeacherDashboard()
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { copyLoading.value = false }
+}
 const rosterDrawerVisible = ref(false)
 const assignmentsDrawerVisible = ref(false)
 const assignmentDialogVisible = ref(false)
@@ -283,7 +314,7 @@ const previewAssignment = computed(() => {
     type: assignmentForm.type,
     description: assignmentForm.description,
     description_format: assignmentForm.description_format,
-    deadline: assignmentForm.deadline || null,
+    deadline: deadlinePayload(),
     allow_late: assignmentForm.allow_late,
     late_policy: assignmentForm.late_policy || null,
     max_score: Number(assignmentForm.max_score),
@@ -618,17 +649,7 @@ function judgeStatusType(status?: string) {
   return 'info'
 }
 function formatDate(value: string | null) {
-  if (!value) {
-    return '未设置'
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return '未设置'
-  }
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
+  return reportDate(value)
 }
 
 function isDialogCancel(error: unknown) {
@@ -841,7 +862,7 @@ async function rerunCurrentReviewGrading() {
     return
   }
   await rerunSubmissionGrading(reviewingSubmissionRow.value)
-  const refreshed = submissionRows.value.find((row) => row.roster.id === reviewingSubmissionRow.value?.roster.id)
+  const refreshed = [...submissionRows.value, ...testSubmissionRows.value].find((row) => row.roster.id === reviewingSubmissionRow.value?.roster.id)
   if (refreshed?.submission) {
     openGradeReviewDialog(refreshed)
   }
@@ -968,7 +989,7 @@ function assignmentMarkdown(assignment: Assignment) {
 function assignmentFormMarkdown() {
   return assignmentMarkdown({
     ...previewAssignment.value, title: assignmentForm.title || '作业标题',
-    description: assignmentForm.description, deadline: assignmentForm.deadline || null,
+    description: assignmentForm.description, deadline: deadlinePayload(),
     max_score: Number(assignmentForm.max_score)
   })
 }
@@ -1053,6 +1074,7 @@ async function refreshMe() {
 }
 
 async function submitLogin() {
+  if (loading.value) return
   loading.value = true
   try {
     const { user } = await api.login(loginForm.username, loginForm.password)
@@ -1075,6 +1097,7 @@ async function submitLogin() {
 }
 
 async function submitRegister() {
+  if (loading.value) return
   loading.value = true
   try {
     await api.register({
@@ -1103,6 +1126,7 @@ async function logout() {
   managedAssignments.value = []
   studentAssignments.value = []
   submissionRows.value = []
+  testSubmissionRows.value = []
   gradeAnalysis.value = null
   selectedClassId.value = undefined
   selectedStudentClassId.value = undefined
@@ -1241,24 +1265,38 @@ async function updateClassMeta() {
   }
 }
 
-function handleFileChange(event: Event) {
+async function handleFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   selectedFile.value = input.files?.[0] ?? null
+  input.value = ''
+  if (!selectedFile.value || !importForm.class_id) return
+  const formData = new FormData()
+  formData.append('file', selectedFile.value)
+  formData.append('class_id', String(importForm.class_id))
+  formData.append('preview', 'true')
+  rosterLoading.value = true
+  try {
+    parsedStudentCount.value = (await api.previewRosterExcel(formData)).student_count
+    importDialogVisible.value = true
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { rosterLoading.value = false }
 }
 
 function handleSubmissionFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   selectedSubmissionFile.value = input.files?.[0] ?? null
+  input.value = ''
 }
 
 function openImportDialog(courseClass: AdminClass) {
+  if (rosterLoading.value) return
   selectedClassId.value = courseClass.id
   importForm.class_id = courseClass.id
   selectedFile.value = null
-  importDialogVisible.value = true
+  rosterInput.value?.click()
 }
 
-async function importRoster() {
+async function importRoster(mode: 'append' | 'replace') {
   if (!selectedFile.value) {
     ElMessage.error('请先选择 Excel 文件')
     return
@@ -1270,10 +1308,11 @@ async function importRoster() {
   const formData = new FormData()
   formData.append('file', selectedFile.value)
   formData.append('class_id', String(importForm.class_id))
+  formData.append('mode', mode)
   rosterLoading.value = true
   try {
     const result = await api.importRosterExcel(formData)
-    ElMessage.success(`导入完成：新增 ${result.imported_count} 人，更新 ${result.updated_count} 人`)
+    ElMessage.success(`导入完成：新增 ${result.imported_count} 人，更新 ${result.updated_count} 人，移除 ${result.removed_count} 人，保留已注册 ${result.preserved_registered_count} 人`)
     importDialogVisible.value = false
     await loadTeacherDashboard()
     if (rosterDrawerVisible.value && selectedClassId.value) {
@@ -1451,7 +1490,7 @@ async function openAssignmentDialog(courseClass: AdminClass, assignment?: Assign
     assignmentForm.type = assignment.type
     assignmentForm.description = assignment.description ?? ''
     assignmentForm.description_format = 'markdown'
-    assignmentForm.deadline = assignment.deadline ? assignment.deadline.slice(0, 19) : ''
+    assignmentForm.deadline = assignment.deadline ? reportDate(assignment.deadline).replace(' ', 'T') : ''
     assignmentForm.allow_late = assignment.allow_late
     assignmentForm.late_policy = assignment.late_policy ?? ''
     assignmentForm.max_score = assignment.max_score
@@ -1496,7 +1535,7 @@ function assignmentPayload(status: Assignment['status']): AssignmentPayload {
     type: assignmentForm.type,
     description: assignmentForm.description,
     description_format: 'markdown',
-    deadline: assignmentForm.deadline || null,
+    deadline: deadlinePayload(),
     allow_late: assignmentForm.allow_late,
     late_policy: assignmentForm.late_policy,
     max_score: Number(assignmentForm.max_score),
@@ -1597,6 +1636,16 @@ async function openSubmissionRequirementDialog(index?: number) {
 }
 
 function saveSubmissionRequirement() {
+  const maxSizeMb = Number(submissionRequirementForm.max_size_mb)
+  if (!Number.isFinite(maxSizeMb) || maxSizeMb <= 0 || maxSizeMb > 64) {
+    ElMessage.warning('大小上限必须大于 0 且不超过 64 MB')
+    return
+  }
+  const weightPercent = Number(submissionRequirementForm.weight_percent)
+  if (submissionRequirementForm.required && (!Number.isFinite(weightPercent) || weightPercent < 0 || weightPercent > 100)) {
+    ElMessage.warning('权重必须为 0 到 100 之间的数字')
+    return
+  }
   const saved = { ...submissionRequirementForm, allowed_extensions: [...submissionRequirementForm.allowed_extensions] }
   if (!saved.required) saved.weight_percent = 0
   if (editingRequirementIndex.value === null) {
@@ -1855,6 +1904,8 @@ async function deleteAssignment(row: Assignment) {
 
 async function openSubmissionsDrawer(row: Assignment) {
   selectedAssignmentId.value = row.id
+  submissionRows.value = []
+  testSubmissionRows.value = []
   gradeAnalysis.value = null
   scoreManagerForm.field = row.type === 'lab_report' ? row.code : 'homework'
   scoreManagerForm.command_type = row.type === 'lab_report' ? 'lab' : 'regular'
@@ -1869,6 +1920,7 @@ async function loadSubmissions(assignmentId: number) {
     const result = await api.listAssignmentSubmissions(assignmentId)
     gradeAnalysis.value = result.analysis
     submissionRows.value = result.submissions
+    testSubmissionRows.value = result.test_submissions ?? []
   } catch (error) {
     ElMessage.error((error as Error).message)
   } finally {
@@ -2035,11 +2087,11 @@ async function loadStudentAssignments(classId: number) {
   }
 }
 
-async function openSubmissionDialog(assignment: Assignment, requirement: SubmissionRequirement) {
+async function openSubmissionDialog(assignment: Assignment, requirement: SubmissionRequirement, uploadFile = false) {
   submittingAssignment.value = assignment
   submittingRequirement.value = requirement
   selectedSubmissionFile.value = null
-  if (requirement.allowed_extensions.includes('.md')) {
+  if (requirement.allowed_extensions.includes('.md') && !uploadFile) {
     try {
       const result = await api.openMarkdownDocument({ class_id: assignment.class_id, assignment_id: assignment.id, kind: 'submission', item_key: requirement.key })
       studentMarkdownDocument.value = result.document
@@ -2172,19 +2224,19 @@ onMounted(() => {
     <section v-if="!currentUser" class="auth-panel">
       <el-tabs v-model="authMode" stretch>
         <el-tab-pane label="登录" name="login">
-          <el-form class="form" label-position="top" @submit.prevent>
+          <el-form class="form" label-position="top" @submit.prevent="submitLogin">
             <el-form-item label="登录名">
               <el-input v-model="loginForm.username" autocomplete="username" placeholder="教师昵称 / 学生真实姓名或编号" />
             </el-form-item>
             <el-form-item label="密码">
               <el-input v-model="loginForm.password" type="password" autocomplete="current-password" show-password />
             </el-form-item>
-            <el-button class="primary-action" type="primary" :loading="loading" @click="submitLogin">登录</el-button>
+            <el-button class="primary-action" type="primary" native-type="submit" :loading="loading">登录</el-button>
           </el-form>
         </el-tab-pane>
 
         <el-tab-pane label="注册 / 申请" name="register">
-          <el-form class="form" label-position="top" @submit.prevent>
+          <el-form class="form" label-position="top" @submit.prevent="submitRegister">
             <el-form-item label="账号类型">
               <el-segmented
                 v-model="registerRole"
@@ -2208,7 +2260,7 @@ onMounted(() => {
             <el-form-item label="密码">
               <el-input v-model="registerForm.password" type="password" autocomplete="new-password" show-password />
             </el-form-item>
-            <el-button class="primary-action" type="primary" :icon="CirclePlus" :loading="loading" @click="submitRegister">
+            <el-button class="primary-action" type="primary" native-type="submit" :icon="CirclePlus" :loading="loading">
               {{ registerRole === 'teacher' ? '提交教师申请' : '注册学生账号' }}
             </el-button>
           </el-form>
@@ -2281,13 +2333,14 @@ onMounted(() => {
       <section class="toolbar-band compact-toolbar">
         <div class="toolbar-actions">
           <el-button type="primary" :icon="CirclePlus" @click="openClassDialog">添加班级</el-button>
+          <el-button :icon="Files" @click="imageLibraryVisible = true">图片库管理</el-button>
           <el-tag effect="plain">{{ adminClasses.length }} 个班级</el-tag>
           <el-button :icon="Refresh" :loading="classLoading" @click="loadTeacherDashboard">刷新</el-button>
         </div>
       </section>
 
       <section class="dashboard-card">
-        <el-table :data="adminClasses" v-loading="classLoading" row-key="id" empty-text="暂无教学班">
+        <el-table :data="adminClasses" v-loading="classLoading" row-key="id" empty-text="暂无教学班" row-class-name="clickable-row" @row-click="openAssignmentsDrawer">
           <el-table-column prop="course.semester" label="学期" min-width="130" />
           <el-table-column prop="course.name" label="课程" min-width="180" />
           <el-table-column prop="alias" label="别名" min-width="130" />
@@ -2295,7 +2348,7 @@ onMounted(() => {
           <el-table-column prop="assignment_count" label="作业" width="90" />
           <el-table-column label="操作" width="190" fixed="right" class-name="operation-column">
             <template #default="{ row }">
-              <div class="row-actions">
+              <div class="row-actions" @click.stop>
                 <el-button :icon="View" circle title="学生列表" @click="openRosterDrawer(row)" />
                 <el-button :icon="Files" circle title="作业列表" @click="openAssignmentsDrawer(row)" />
                 <el-button :icon="DocumentAdd" type="primary" circle title="发布作业" @click="openAssignmentDialog(row)" />
@@ -2315,7 +2368,10 @@ onMounted(() => {
               <h2>我的班级</h2>
               <p>{{ studentClasses.length }} 个已绑定班级</p>
             </div>
-            <el-button :icon="Refresh" circle title="刷新" :loading="classLoading" @click="loadStudentDashboard" />
+            <div class="toolbar-actions">
+              <el-button :icon="Files" @click="imageLibraryVisible = true">图片库管理</el-button>
+              <el-button :icon="Refresh" circle title="刷新" :loading="classLoading" @click="loadStudentDashboard" />
+            </div>
           </div>
           <el-table
             :data="studentClasses"
@@ -2424,7 +2480,13 @@ onMounted(() => {
                 </div>
               </div>
               <el-table :data="selectedStudentAssignment.submission_requirements" row-key="key" empty-text="暂无提交项">
-                <el-table-column prop="label" label="提交项" min-width="160" />
+                <el-table-column label="提交项" min-width="210">
+                  <template #default="{ row }">
+                    <strong>{{ row.label }}</strong>
+                    <el-tag :type="row.required ? 'danger' : 'info'" :effect="row.required ? 'dark' : 'plain'" class="requirement-badge">{{ row.required ? '必交' : '选交 · 不计分' }}</el-tag>
+                    <div class="requirement-extensions">文件后缀：{{ row.allowed_extensions.join(' / ') }}</div>
+                  </template>
+                </el-table-column>
                 <el-table-column label="状态" width="120">
                   <template #default="{ row }">
                     <el-tag :type="requirementStatusType(selectedStudentAssignment, row.key)" effect="plain">
@@ -2432,11 +2494,12 @@ onMounted(() => {
                     </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="150">
+              <el-table-column label="操作" min-width="230">
                 <template #default="{ row }">
                   <el-button type="primary" :icon="Upload" :disabled="!canSubmitRequirement(selectedStudentAssignment)" @click="openSubmissionDialog(selectedStudentAssignment, row)">
-                    {{ submissionActionLabel(selectedStudentAssignment, row.key) }}
+                    {{ row.allowed_extensions.includes('.md') ? '在线编辑' : submissionActionLabel(selectedStudentAssignment, row.key) }}
                   </el-button>
+                  <el-button v-if="row.allowed_extensions.includes('.md')" :icon="Upload" :disabled="!canSubmitRequirement(selectedStudentAssignment)" @click="openSubmissionDialog(selectedStudentAssignment, row, true)">上传文件</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -2473,7 +2536,7 @@ onMounted(() => {
       </template>
     </el-dialog>
     <el-dialog v-model="classDialogVisible" title="添加教学班" width="min(620px, 94vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="class-create-form" label-position="top" @submit.prevent="createTeachingClass">
         <section class="workflow-card">
           <h2>教学班</h2>
         <el-form-item label="班级别名">
@@ -2498,12 +2561,12 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="classDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="CirclePlus" @click="createTeachingClass">创建</el-button>
+        <el-button type="primary" :icon="CirclePlus" native-type="submit" form="class-create-form">创建</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="classMetaDialogVisible" title="编辑课程信息" width="min(620px, 94vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="class-meta-form" label-position="top" @submit.prevent="updateClassMeta">
         <section class="workflow-card">
           <h2>教学班</h2>
         <el-form-item label="教学班名称">
@@ -2525,22 +2588,18 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="classMetaDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="Check" @click="updateClassMeta">保存</el-button>
+        <el-button type="primary" :icon="Check" native-type="submit" form="class-meta-form">保存</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="importDialogVisible" title="导入学生名单" width="460px">
-      <el-form label-position="top" @submit.prevent>
-        <el-form-item label="目标教学班">
-          <el-input :model-value="currentClass ? `${currentClass.name} (${currentClass.alias})` : ''" disabled />
-        </el-form-item>
-        <el-form-item label="Excel 名单">
-          <input class="file-input" type="file" accept=".xlsx,.xlsm" @change="handleFileChange" />
-        </el-form-item>
-      </el-form>
+    <input ref="rosterInput" type="file" accept=".xlsx,.xlsm" hidden @change="handleFileChange" />
+    <el-dialog v-model="importDialogVisible" title="确认导入学生名单" width="min(500px, 94vw)" :close-on-click-modal="!rosterLoading" :show-close="!rosterLoading">
+      <p>已解析 {{ parsedStudentCount }} 名学生，导入至 {{ currentClass?.alias }}，需要追加还是覆盖？</p>
+      <p class="muted-line">追加：只新增编号，保留已有名单。覆盖：更新未注册名单并移除文件中没有的未注册学生。已绑定账号的学生始终保留；姓名或学号冲突时取消导入。</p>
       <template #footer>
-        <el-button @click="importDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="Upload" :loading="rosterLoading" @click="importRoster">导入</el-button>
+        <el-button :disabled="rosterLoading" @click="importDialogVisible = false">取消</el-button>
+        <el-button :loading="rosterLoading" @click="importRoster('replace')">覆盖</el-button>
+        <el-button type="primary" :loading="rosterLoading" @click="importRoster('append')">追加</el-button>
       </template>
     </el-dialog>
 
@@ -2593,14 +2652,14 @@ onMounted(() => {
     </el-drawer>
 
     <el-dialog v-model="batchRosterDialogVisible" title="批量修改学生信息班级" width="min(460px, 94vw)" :close-on-click-modal="!batchRosterLoading">
-      <el-form label-position="top" @submit.prevent="batchRoster('update_class')">
+      <el-form id="roster-batch-form" label-position="top" @submit.prevent="batchRoster('update_class')">
         <el-form-item :label="`所选 ${selectedRoster.length} 名学生的新班级`">
           <el-input v-model="batchSourceClass" maxlength="120" placeholder="例如：计算机261" />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button :disabled="batchRosterLoading" @click="batchRosterDialogVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!batchSourceClass.trim() || !selectedRoster.length" :loading="batchRosterLoading" @click="batchRoster('update_class')">保存</el-button>
+        <el-button type="primary" :disabled="!batchSourceClass.trim() || !selectedRoster.length" :loading="batchRosterLoading" native-type="submit" form="roster-batch-form">保存</el-button>
       </template>
     </el-dialog>
 
@@ -2615,7 +2674,7 @@ onMounted(() => {
           <el-button type="primary" :icon="DocumentAdd" @click="currentClass && openAssignmentDialog(currentClass)">新建作业</el-button>
         </div>
       </div>
-      <el-table :data="managedAssignments" v-loading="assignmentLoading" row-key="id" empty-text="暂无作业">
+      <el-table :data="managedAssignments" v-loading="assignmentLoading" row-key="id" empty-text="暂无作业" row-class-name="clickable-row" @row-click="openSubmissionsDrawer">
         <el-table-column prop="title" label="作业" min-width="180" />
         <el-table-column prop="code" label="代码" width="100" />
         <el-table-column label="类型" width="90">
@@ -2633,12 +2692,13 @@ onMounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right" class-name="operation-column">
+        <el-table-column label="操作" width="230" fixed="right" class-name="operation-column">
           <template #default="{ row }">
-            <div class="row-actions">
+            <div class="row-actions" @click.stop>
               <el-button :icon="Files" circle title="提交状态" @click="openSubmissionsDrawer(row)" />
               <el-button :icon="View" circle title="预览" @click="openAssignmentPreview(row)" />
               <el-button :icon="Edit" circle title="编辑" @click="currentClass && openAssignmentDialog(currentClass, row)" />
+              <el-button :icon="CopyDocument" circle title="迁移到其他班级" @click="openCopyAssignment(row)" />
               <el-button v-if="row.status === 'draft'" type="primary" :icon="Check" circle title="发布" @click="publishAssignment(row)" />
               <el-button type="danger" :icon="Delete" circle title="删除" @click="deleteAssignment(row)" />
             </div>
@@ -2739,15 +2799,23 @@ onMounted(() => {
         <ProgressCard label="速度" :value="`${formatOptionalNumber(gradeAnalysis.average_submit_days_after_publish)} / ${formatOptionalNumber(gradeAnalysis.publish_to_deadline_days)} 天`" :percentage="progressPercent(gradeAnalysis.average_submit_days_after_publish, gradeAnalysis.publish_to_deadline_days)" note="平均提交用时 / 发布至截止" />
         <ProgressCard label="批改进度" :value="`${gradeAnalysis.published_count} / ${gradeAnalysis.submitted_count}`" :percentage="progressPercent(gradeAnalysis.published_count, gradeAnalysis.submitted_count)" :note="`已反馈 / 已提交 · 待批改 ${gradeAnalysis.pending_grading_count} · 待发布 ${gradeAnalysis.reviewed_count}`" />
       </div>
+      <section v-for="group in [
+        { key: 'students', rows: submissionRows, title: '班级学生' },
+        { key: 'test', rows: testSubmissionRows, title: '00 测试学生' }
+      ].filter(group => group.key === 'students' || group.rows.length)" :key="group.key" class="submission-group">
+      <div class="card-header">
+        <h3>{{ group.title }}</h3>
+        <el-tag v-if="group.key === 'test'" type="info" effect="plain">不计入班级统计和成绩导出</el-tag>
+      </div>
       <el-table
-        :data="submissionRows"
+        :data="group.rows"
         v-loading="submissionLoading"
         row-key="roster.id"
         empty-text="暂无名单"
         :row-class-name="submissionRowClassName"
         @row-click="openGradeReviewDialog"
       >
-        <el-table-column type="index" label="序号" width="80" />
+        <el-table-column prop="roster.student_no" label="序号" width="80" />
         <el-table-column prop="roster.student_name" label="姓名" min-width="120" />
         <el-table-column label="提交日期" min-width="120">
           <template #default="{ row }">{{ row.is_expired ? '已过期' : row.student_state === 'submitted' && row.submission ? formatDate(row.submission.submitted_at) : '-' }}</template>
@@ -2764,6 +2832,7 @@ onMounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      </section>
     </el-drawer>
 
         <el-dialog v-model="scoreManagerDialogVisible" title="ScoreManagerCLI 导出" width="min(760px, 94vw)" class="structured-form-dialog">
@@ -2986,7 +3055,7 @@ onMounted(() => {
     </el-dialog>
 
     <el-dialog v-model="llmConfigDialogVisible" title="LLM 配置" width="min(620px, 94vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="llm-config-form" label-position="top" @submit.prevent="saveLLMConfig">
         <section class="workflow-card">
           <h2>模型连接</h2>
         <el-form-item label="Provider">
@@ -3011,12 +3080,12 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="llmConfigDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="Check" @click="saveLLMConfig">保存</el-button>
+        <el-button type="primary" :icon="Check" native-type="submit" form="llm-config-form">保存</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="submissionRequirementDialogVisible" :title="editingRequirementIndex === null ? '新增提交项' : '编辑提交项'" width="min(720px, 94vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="submission-requirement-form" label-position="top" novalidate @submit.prevent="saveSubmissionRequirement">
         <section class="workflow-card">
           <h2>基本信息</h2>
         <div class="form-grid wide">
@@ -3066,12 +3135,12 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="submissionRequirementDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="Check" @click="saveSubmissionRequirement">保存</el-button>
+        <el-button type="primary" :icon="Check" native-type="submit" form="submission-requirement-form">保存</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="programEvaluationDialogVisible" :title="editingProgramEvaluationIndex === null ? '新增程序评测' : '编辑程序评测'" width="min(900px, 96vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="program-evaluation-form" label-position="top" @submit.prevent="saveProgramEvaluation">
         <section class="workflow-card">
           <h2>评测设置</h2>
         <div class="form-grid wide">
@@ -3122,12 +3191,12 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="programEvaluationDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="Check" @click="saveProgramEvaluation">保存</el-button>
+        <el-button type="primary" :icon="Check" native-type="submit" form="program-evaluation-form">保存</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="aiEvaluationDialogVisible" :title="editingAiEvaluationIndex === null ? '新增 AI 评测' : '编辑 AI 评测'" width="min(820px, 96vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="ai-evaluation-form" label-position="top" @submit.prevent="saveAiEvaluation">
         <section class="workflow-card">
           <h2>评测设置</h2>
         <div class="form-grid wide">
@@ -3172,7 +3241,7 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="aiEvaluationDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="Check" @click="saveAiEvaluation">保存</el-button>
+        <el-button type="primary" :icon="Check" native-type="submit" form="ai-evaluation-form">保存</el-button>
       </template>
     </el-dialog>
 
@@ -3215,7 +3284,7 @@ onMounted(() => {
             <h2 id="assignment-description-title">作业说明</h2>
             <el-tag effect="plain">Markdown</el-tag>
           </div>
-          <MarkdownEditor v-if="teacherMarkdownDocument" :key="teacherMarkdownDocument.id" ref="teacherMarkdownEditor"
+          <MarkdownEditor v-if="teacherMarkdownDocument" :key="teacherMarkdownDocument.id" ref="teacherMarkdownEditor" library-role="teacher"
             v-model="assignmentForm.description" :document-id="teacherMarkdownDocument.id" :initial-revision="teacherMarkdownDocument.revision"
             :preview-source="assignmentFormMarkdown()" :filename="`${assignmentForm.code || 'assignment'}.md`" />
           <el-alert v-else title="正在加载 Markdown 编辑器…" type="info" :closable="false" />
@@ -3321,7 +3390,7 @@ onMounted(() => {
 
     <el-dialog v-model="markdownDialogVisible" :title="`在线编辑 ${submittingRequirement?.label ?? 'Markdown 作业'}`" fullscreen class="assignment-editor-dialog student-markdown-dialog" :before-close="closeStudentMarkdownEditor" destroy-on-close>
       <el-alert title="草稿会自动保存。完成编辑后，请回到作业页面点击“确认提交作业”。" type="info" :closable="false" show-icon />
-      <MarkdownEditor v-if="studentMarkdownDocument" :key="studentMarkdownDocument.id" ref="studentMarkdownEditor"
+      <MarkdownEditor v-if="studentMarkdownDocument" :key="studentMarkdownDocument.id" ref="studentMarkdownEditor" library-role="student"
         v-model="studentMarkdownContent" :document-id="studentMarkdownDocument.id" :initial-revision="studentMarkdownDocument.revision"
         :filename="(expectedSubmissionName || 'report.md').replace('{extension}', '.md')" />
       <template #footer>
@@ -3341,7 +3410,10 @@ onMounted(() => {
           <strong>{{ submittingRequirement.max_size_mb }} MB</strong>
         </div>
       </div>
-      <input class="file-input" type="file" :accept="submittingRequirement?.allowed_extensions.join(',')" @change="handleSubmissionFileChange" />
+      <el-alert v-if="submittingRequirement?.allowed_extensions.includes('.md')" title="若 Markdown 中有图片，需要在在线编辑器中上传图片；本地图片不会随 .md 文件上传。" type="warning" :closable="false" show-icon />
+      <input ref="submissionFileInput" type="file" :accept="submittingRequirement?.allowed_extensions.join(',')" hidden @change="handleSubmissionFileChange" />
+      <el-button class="submission-select-button" type="primary" plain :icon="Files" @click="submissionFileInput?.click()">选择文件</el-button>
+      <div class="selected-file-label" role="status">{{ selectedSubmissionFile?.name || '尚未选择文件' }}</div>
       <template #footer>
         <el-button @click="submissionDialogVisible = false">取消</el-button>
         <el-button type="primary" :icon="Upload" :loading="submissionLoading" @click="submitAssignmentFile">
@@ -3350,8 +3422,27 @@ onMounted(() => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="imageLibraryVisible" title="我的图片库" width="min(900px, 94vw)" destroy-on-close>
+      <ImageLibrary v-if="imageLibraryVisible && (isTeacher || currentUser?.role === 'student')" :role="isTeacher ? 'teacher' : 'student'" />
+    </el-dialog>
+    <el-dialog v-model="copyDialogVisible" title="迁移作业设置" width="min(500px, 94vw)" :close-on-click-modal="!copyLoading" :show-close="!copyLoading">
+      <p>复制“{{ copyingAssignment?.title }}”的说明、配图、提交规则与评测设置。目标作业保存为草稿，学生提交及成绩不迁移。请检查截止时间与固定写入的班级编号后发布。</p>
+      <el-form id="assignment-copy-form" label-position="top" @submit.prevent="copyAssignmentSettings">
+        <el-form-item label="目标教学班">
+          <el-select v-model="copyClassId" placeholder="选择自己的另一个教学班">
+            <el-option v-for="item in adminClasses.filter(item => item.id !== copyingAssignment?.class_id)" :key="item.id" :value="item.id" :label="`${item.alias} · ${item.course.name}`" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标作业代码"><el-input v-model="copyCode" maxlength="40" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="copyLoading" @click="copyDialogVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!copyClassId || !copyCode.trim()" :loading="copyLoading" native-type="submit" form="assignment-copy-form">迁移为草稿</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="studentDialogVisible" :title="editingRosterId ? '编辑学生' : '新增学生'" width="min(620px, 94vw)" class="structured-form-dialog">
-      <el-form label-position="top" @submit.prevent>
+      <el-form id="roster-entry-form" label-position="top" @submit.prevent="saveRosterEntry">
         <section class="workflow-card">
           <h2>学生身份</h2>
         <el-form-item label="真实姓名">
@@ -3373,7 +3464,7 @@ onMounted(() => {
       </el-form>
       <template #footer>
         <el-button @click="studentDialogVisible = false">取消</el-button>
-        <el-button type="primary" :icon="editingRosterId ? Check : CirclePlus" @click="saveRosterEntry">
+        <el-button type="primary" :icon="editingRosterId ? Check : CirclePlus" native-type="submit" form="roster-entry-form">
           {{ editingRosterId ? '保存' : '新增' }}
         </el-button>
       </template>

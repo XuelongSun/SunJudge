@@ -204,6 +204,25 @@ def import_classes_from_excel():
     except RosterImportError as exc:
         return jsonify({"message": str(exc)}), HTTPStatus.BAD_REQUEST
 
+    if request.form.get("preview") == "true":
+        return jsonify(student_count=len(imported_roster.students))
+    mode = request.form.get("mode", "append")
+    if mode not in {"append", "replace"}:
+        return jsonify(message="请选择追加或覆盖。"), 400
+    entries = ClassRoster.query.filter_by(class_id=course_class.id).all()
+    by_id = {entry.student_id: entry for entry in entries}
+    incoming_ids = {_student_id_for_class(course_class, student.student_no) for student in imported_roster.students}
+    for student in imported_roster.students:
+        entry = by_id.get(_student_id_for_class(course_class, student.student_no))
+        if entry and entry.matched_user_id and (entry.student_name != student.student_name or entry.student_number != student.student_number):
+            return jsonify(message=f"{entry.student_id} 已绑定账号，姓名或学号不一致，导入已取消。"), 409
+    removed_count = 0
+    if mode == "replace":
+        for entry in entries:
+            if entry.student_id not in incoming_ids and not entry.matched_user_id:
+                db.session.delete(entry)
+                removed_count += 1
+
     course = course_class.course
     if imported_roster.course_name:
         course.name = imported_roster.course_name
@@ -218,6 +237,8 @@ def import_classes_from_excel():
         student_id = _student_id_for_class(course_class, student.student_no)
         existing = ClassRoster.query.filter_by(class_id=course_class.id, student_id=student_id).first()
         if existing:
+            if mode == "append" or existing.matched_user_id:
+                continue
             existing.student_name = student.student_name
             existing.student_no = student.student_no
             existing.student_number = student.student_number
@@ -246,6 +267,8 @@ def import_classes_from_excel():
                 "class_id": course_class.id,
                 "imported_count": imported_count,
                 "updated_count": updated_count,
+                "mode": mode,
+                "removed_count": removed_count,
             },
         )
     )
@@ -256,6 +279,8 @@ def import_classes_from_excel():
             "class_id": course_class.id,
             "imported_count": imported_count,
             "updated_count": updated_count,
+            "removed_count": removed_count,
+            "preserved_registered_count": sum(bool(entry.matched_user_id) and entry.student_id not in incoming_ids for entry in entries),
         }
     ), HTTPStatus.CREATED
 

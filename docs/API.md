@@ -105,3 +105,22 @@ GET/PUT `/admin/llm-config`，仅教师自身。PUT 为 `{base_url,model,api_key
 - GET `/assets/{id}/content`：登录且满足文档/快照访问权限后返回图片，Cache-Control为private,no-store。不能公开代理、跨账号缓存或直接暴露上传目录。
 - 学生确认整份提交会生成不可变.md快照及图片引用；教师只能读取已确认快照引用的报告图片。教师说明图需已保存并发布，且属于该班学生才可读取；管理员不自动绕过图片权限。
 - 程序评测仍只运行.py；AI以Pydantic验证逐rubric结构并重算汇总，只读文本，不识别图片。数据库与所有图片必须共同备份，导出的.md本身不包含图片二进制。
+
+
+## 作业复用与教师图片库（2026-10-11）
+
+- `POST /admin/assignments/{id}/copy`：教师传 `{ "class_id": 目标班ID, "code": "hw1" }`，code可省略沿用来源。仅允许同一教师的两个不同教学班，返回201 `{assignment}`（草稿）。代码冲突409；目标越权404。只复制设置，图片复用原URL，学生数据不复制。
+- `GET /teacher/images`：已审批教师返回 `{assets:[{id,url,filename,file_size}]}`，仅自己的图片。
+- `POST /teacher/images`：multipart `file`，返回201 `{asset}`。PNG/JPEG、5MB/张、1000万像素；教师库上限1000张/500MB。原文档上传接口的说明图片也自动进入库。
+- `DELETE /teacher/images/{id}`：只能删除自己的未引用图片；仍有说明/草稿/历史提交引用返回409，越权404。
+- `GET /assets/{id}/content`：教师库图片供本人或引用它的已发布作业所在班级的学生读取，其他人404。学生报告图片仍沿用文档及已提交快照权限。
+- `POST /admin/classes/import-excel` 新增表单字段 `preview=true`：只解析返回200 `{student_count}`，不修改名单/课程；正式导入传 `mode=append`（默认，只新增）或 `replace`（更新未绑定项并删除文件中不存在的未绑定项）。返回新增 `removed_count`、`preserved_registered_count`；已绑定项不会覆盖或删除，姓名/学号冲突409。
+- 教师作业计数、成绩分析、CSV与ScoreManagerCLI导出排除当前教学班编号00；名单查询仍返回00。`GET /admin/assignments/{id}/submissions` 的 `submissions` 仅含普通学生，新增 `test_submissions` 单独返回00名单项（未提交时也返回），结构相同并支持现有预览、批改、重测和退回接口；没有00时为 `[]`。
+- `deadline` 中带时区的输入在写库前统一转UTC，前端固定使用北京时间+08:00；无时区API输入仍按UTC兼容旧调用方。
+
+
+## 学生图片库（2026-10-11）
+
+`GET /student/images`、`POST /student/images`（multipart file）及`DELETE /student/images/{id}`与教师图片库响应结构一致，仅学生本人可管理；教师端路径仍只允许教师使用，不能用切换路径跨角色访问。新字段markdown_assets.student_user_id通过迁移f5b20c8d316a回填既有报告图片所有者。GET图片内容允许学生本人，教师只有在自己的已确认作业快照中实际引用该图片时可读；其他学生及不相关教师404。图片可跨自己的报告复用，删除引用中的图片409。独立库上传不受某次作业截止限制；作业草稿编辑、图片上传与确认仍执行原截止/成绩发布限制。个人库1000张/500MB，报告引用50张/50MB。
+
+直接上传.md而未打开在线编辑器时，确认提交也会解析库图片引用并记录快照引用ID，执行相同所有权及配额检查；不接受本地或外部图片引用。旧的个人图片自动归库后不再被未引用图片定时清理删除。

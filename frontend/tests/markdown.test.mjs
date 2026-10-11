@@ -19,9 +19,19 @@ function loadTypeScript(name) {
   return module.exports
 }
 const { renderContent } = loadTypeScript('markdown')
-const { homeworkMarkdown, feedbackMarkdown, reportDate } = loadTypeScript('reportTemplates')
+const { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput } = loadTypeScript('reportTemplates')
 const { aiResultRows } = loadTypeScript('gradingPresentation')
 const { progressPercent, filenamePreview, insertAtSelection, completionSegments } = loadTypeScript('presentation')
+
+test('deadline input, saved UTC time and Markdown preview round trip in Shanghai time', () => {
+  const input = '2030-10-11T23:59:00'
+  const payload = deadlineFromInput(input)
+  assert.equal(payload, '2030-10-11T23:59:00+08:00')
+  assert.equal(new Date(payload).toISOString(), '2030-10-11T15:59:00.000Z')
+  assert.equal(reportDate(payload), '2030-10-11 23:59:00')
+  assert.equal(reportDate('2030-10-11T15:59:00').replace(' ', 'T'), input)
+  assert.equal(deadlineFromInput(''), null)
+})
 
 test('progress ratios handle empty metrics and late submission durations', () => {
   assert.equal(progressPercent(3, 4), 75)

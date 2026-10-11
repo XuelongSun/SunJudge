@@ -9,6 +9,42 @@ from app.models import Assignment, AssignmentRead, CourseClass, Submission
 from test_assignments import _create_class_with_student
 
 
+def test_teacher_library_migration_preserves_and_backfills_old_assets(tmp_path):
+    class MigrationConfig(TestingConfig):
+        SQLALCHEMY_DATABASE_URI = f"sqlite:///{tmp_path / 'library.sqlite'}"
+    app = create_app(MigrationConfig)
+    runner = app.test_cli_runner()
+    result = runner.invoke(args=['db', 'upgrade', 'c8b4e2d1f690'])
+    assert result.exit_code == 0, result.output
+    class_id, teacher_id, student_id, _ = _create_class_with_student(app)
+    with app.app_context():
+        from app.models import MarkdownDocument
+        teacher_doc = MarkdownDocument(owner_id=teacher_id, class_id=class_id, kind='description', content='旧说明')
+        student_doc = MarkdownDocument(owner_id=student_id, class_id=class_id, kind='submission', content='旧报告')
+        db.session.add_all([teacher_doc, student_doc])
+        db.session.flush()
+        for doc, key in [(teacher_doc, 'a' * 32), (student_doc, 'b' * 32)]:
+            db.session.execute(text('''INSERT INTO markdown_assets
+                (id, document_id, original_filename, file_path, mime_type, file_size, created_at)
+                VALUES (:id, :document_id, 'old.png', 'unchanged/old.png', 'image/png', 100, CURRENT_TIMESTAMP)'''),
+                {'id': key, 'document_id': doc.id})
+        db.session.commit()
+    result = runner.invoke(args=['db', 'upgrade'])
+    assert result.exit_code == 0, result.output
+    with app.app_context():
+        from app.models import MarkdownAsset
+        teacher_image = db.session.get(MarkdownAsset, 'a' * 32)
+        assert teacher_image.teacher_id == teacher_id
+        assert teacher_image.file_path == 'unchanged/old.png'
+        student_image = db.session.get(MarkdownAsset, 'b' * 32)
+        assert student_image.teacher_id is None
+        assert student_image.student_user_id == student_id
+        assert teacher_image.student_user_id is None
+        assert next(col for col in inspect(db.engine).get_columns('markdown_assets') if col['name'] == 'document_id')['nullable']
+        db.session.remove()
+        db.engine.dispose()
+
+
 @pytest.mark.parametrize("unnamed_legacy_constraint", [False, True])
 def test_legacy_null_backfill_and_fresh_migration_match_models(tmp_path, unnamed_legacy_constraint):
     class MigrationConfig(TestingConfig):

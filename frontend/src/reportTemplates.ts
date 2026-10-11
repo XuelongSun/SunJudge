@@ -1,4 +1,8 @@
 // Metadata is literal text; Markdown is intentionally preserved only in document bodies.
+export function deadlineFromInput(value: string): string | null {
+  return value ? `${value}+08:00` : null
+}
+
 export function reportDate(value: string | null): string {
   if (!value) return '未设置'
   const date = new Date(/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`)
