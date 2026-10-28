@@ -61,8 +61,6 @@
 
 ## 开发与自托管
 
-本次生产更新的迁移、部署顺序与兼容性说明见[2026-10-28 更新说明](docs/RELEASE_NOTES_2026-10-28.md)。
-
 技术栈：Flask、SQLAlchemy、Alembic、Vue 3、TypeScript、Element Plus；本地使用 SQLite，生产使用 MySQL，Python 评测使用 Docker。生产部署采用 Ubuntu、Nginx、Gunicorn 和 Supervisor。
 
 本地启动后端：
