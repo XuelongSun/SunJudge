@@ -130,7 +130,7 @@ def test_m4_teacher_grade_analysis_csv_scoremanager_and_student_summary(client):
     assert "Well done." in csv_text
 
     commands = client.get(f"/api/admin/assignments/{assignment_id}/scoremanager-commands?field=homework").get_json()["export"]
-    assert commands["commands"] == "rd 06 homework 92"
+    assert commands["commands"] == "rd 06 homework 92.00"
     assert commands["exported_count"] == 1
 
     client.post("/api/auth/logout")

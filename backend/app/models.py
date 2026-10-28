@@ -210,6 +210,7 @@ class Assignment(db.Model):
     rubric_format = db.Column(db.String(20), nullable=False, default=FORMAT_TEXT)
     program_evaluations_json = db.Column(db.JSON, nullable=False, default=list)
     ai_evaluations_json = db.Column(db.JSON, nullable=False, default=list)
+    code_templates_json = db.Column(db.JSON, nullable=False, default=list)
     status = db.Column(db.String(20), nullable=False, default=STATUS_DRAFT)
     created_at = db.Column(db.DateTime, nullable=False, default=utc_now)
     updated_at = db.Column(db.DateTime, nullable=False, default=utc_now, onupdate=utc_now)
@@ -219,6 +220,10 @@ class Assignment(db.Model):
     course_class = db.relationship("CourseClass", backref="assignments")
 
     __table_args__ = (db.UniqueConstraint("class_id", "code", name="uq_assignments_class_code"),)
+
+    @property
+    def effective_description(self) -> str:
+        return (self.description or "").lstrip('\ufeff')
 
     def to_dict(self, include_counts: bool = False, student_user_id: int | None = None) -> dict[str, object]:
         data: dict[str, object] = {
@@ -240,6 +245,10 @@ class Assignment(db.Model):
             "rubric_format": self.rubric_format,
             "program_evaluations": self.program_evaluations_json or [],
             "ai_evaluations": self.ai_evaluations_json or [],
+            "code_templates": [{"id": item["id"], "filename": item["filename"], "file_size": item["file_size"], "purpose": item.get("purpose", ""),
+                                "url": f"/api/assignments/{self.id}/code-templates/{item['id']}/download",
+                                "preview_url": f"/api/assignments/{self.id}/code-templates/{item['id']}/preview"}
+                               for item in self.code_templates_json or []],
             "status": self.status,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -291,6 +300,13 @@ class Assignment(db.Model):
         return query.order_by(Submission.submitted_at.desc(), Submission.id.desc()).first()
 
     def latest_submissions_for(self, student_user_id: int) -> list["Submission"]:
+        override = AssignmentStudentOverride.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()
+        if override and override.preserved_submission_at:
+            rows = Submission.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).order_by(Submission.submitted_at.desc(), Submission.id.desc()).all()
+            latest = {}
+            for row in rows:
+                latest.setdefault(row.submission_item_key, row)
+            return list(latest.values())
         submissions: list[Submission] = []
         for requirement in self.submission_requirements_json or _legacy_submission_requirements(self.file_rules_json):
             item_key = str(requirement.get("key") or "")
@@ -298,6 +314,17 @@ class Assignment(db.Model):
             if latest:
                 submissions.append(latest)
         return submissions
+
+
+class AssignmentStudentOverride(db.Model):
+    __tablename__ = "assignment_student_overrides"
+
+    id = db.Column(db.Integer, primary_key=True)
+    assignment_id = db.Column(db.Integer, db.ForeignKey("assignments.id"), nullable=False, index=True)
+    student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    makeup_allowed = db.Column(db.Boolean, nullable=False, default=False)
+    preserved_submission_at = db.Column(db.DateTime, nullable=True)
+    __table_args__ = (db.UniqueConstraint("assignment_id", "student_user_id", name="uq_assignment_student_override"),)
 
 
 class Submission(db.Model):
@@ -311,6 +338,8 @@ class Submission(db.Model):
     assignment_id = db.Column(db.Integer, db.ForeignKey("assignments.id"), nullable=False)
     student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     submitted_at = db.Column(db.DateTime, nullable=False, default=utc_now)
+    is_makeup = db.Column(db.Boolean, nullable=False, default=False)
+    effective_submitted_at = db.Column(db.DateTime, nullable=True)
     original_filename = db.Column(db.String(255), nullable=False)
     submission_item_key = db.Column(db.String(80), nullable=False, default="main")
     submission_item_label = db.Column(db.String(120), nullable=True)
@@ -333,6 +362,8 @@ class Submission(db.Model):
             "student_user_id": self.student_user_id,
             "student": self.student.to_dict() if self.student else None,
             "submitted_at": self.submitted_at.isoformat(),
+            "is_makeup": self.is_makeup,
+            "effective_submitted_at": (self.effective_submitted_at or self.submitted_at).isoformat(),
             "original_filename": self.original_filename,
             "submission_item_key": self.submission_item_key,
             "submission_item_label": self.submission_item_label,
@@ -628,7 +659,9 @@ def _completed_student_user_ids(assignment_id: int, required_keys: set[str]) -> 
     submitted_by_student: dict[int, set[str]] = {}
     for student_user_id, item_key in rows:
         submitted_by_student.setdefault(int(student_user_id), set()).add(str(item_key))
-    return {student_user_id for student_user_id, submitted_keys in submitted_by_student.items() if required_keys.issubset(submitted_keys)}
+    completed = {student_user_id for student_user_id, submitted_keys in submitted_by_student.items() if required_keys.issubset(submitted_keys)}
+    completed.update(row.student_user_id for row in AssignmentStudentOverride.query.filter_by(assignment_id=assignment_id).filter(AssignmentStudentOverride.preserved_submission_at.isnot(None)).all())
+    return completed
 
 
 def _masked_judge_details(details: dict[str, object]) -> dict[str, object]:

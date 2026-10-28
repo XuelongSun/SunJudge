@@ -127,6 +127,8 @@ export interface Submission {
   student_user_id: number
   student: User | null
   submitted_at: string
+  effective_submitted_at?: string
+  is_makeup?: boolean
   original_filename: string
   submission_item_key: string
   submission_item_label: string | null
@@ -210,7 +212,21 @@ export interface TeacherLLMConfig {
   updated_at: string
 }
 
+export interface CodeTemplate {
+  purpose?: string
+  preview_url?: string
+  id: string
+  filename: string
+  file_size: number
+  url?: string
+  content?: string
+}
+
 export interface Assignment {
+  code_templates?: CodeTemplate[]
+  makeup_allowed?: boolean
+  submission_complete?: boolean
+  submission_preserved?: boolean
   is_expired?: boolean
   display_score?: number | null
   markdown_drafts?: Record<string, MarkdownDraftSummary>
@@ -264,6 +280,9 @@ export interface AssignmentGradeAnalysis {
   max_score: number
 }
 export interface AssignmentSubmissionRow {
+  submitted_at?: string | null
+  is_makeup?: boolean
+  makeup_allowed?: boolean
   is_expired?: boolean
   roster: RosterEntry
   submission: Submission | null
@@ -299,6 +318,7 @@ export interface SubmissionPreview {
 }
 
 export interface AssignmentPayload {
+  code_templates?: CodeTemplate[]
   markdown_document_id?: number
   title: string
   code: string
@@ -436,19 +456,27 @@ export const api = {
     }),
   listManagedAssignments: (classId: number) =>
     request<{ class: AdminClass; assignments: Assignment[] }>(`/api/admin/classes/${classId}/assignments`),
+  validateCodeTemplate: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<{ template: CodeTemplate }>('/api/teacher/code-templates/validate', { method: 'POST', body })
+  },
+  editCodeTemplates: (assignmentId: number) => request<{ templates: CodeTemplate[] }>(`/api/admin/assignments/${assignmentId}/code-templates`),
+  previewCodeTemplate: (assignmentId: number, templateId: string) => request<{ template: CodeTemplate }>(`/api/assignments/${assignmentId}/code-templates/${encodeURIComponent(templateId)}/preview`),
   createAssignment: (classId: number, payload: AssignmentPayload) =>
     request<{ assignment: Assignment }>(`/api/admin/classes/${classId}/assignments`, {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
-  updateAssignment: (assignmentId: number, payload: AssignmentPayload & { reset_grading?: boolean }) =>
+  updateAssignment: (assignmentId: number, payload: AssignmentPayload & { reset_grading?: boolean; require_resubmission?: boolean }) =>
     request<{ assignment: Assignment; reset_grading?: boolean; rerun_count?: number }>(`/api/admin/assignments/${assignmentId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload)
     }),
-  publishAssignment: (assignmentId: number) =>
+  publishAssignment: (assignmentId: number, requireResubmission = false) =>
     request<{ assignment: Assignment }>(`/api/admin/assignments/${assignmentId}/publish`, {
-      method: 'POST'
+      method: 'POST',
+      body: JSON.stringify({ require_resubmission: requireResubmission })
     }),
   deleteAssignment: (assignmentId: number) =>
     request<{ message: string; class_id: number }>(`/api/admin/assignments/${assignmentId}`, {
@@ -458,10 +486,13 @@ export const api = {
     request<{ assignment: Assignment; analysis: AssignmentGradeAnalysis; submissions: AssignmentSubmissionRow[]; test_submissions: AssignmentSubmissionRow[] }>(`/api/admin/assignments/${assignmentId}/submissions`),
   listAssignmentGrades: (assignmentId: number) =>
     request<{ assignment: Assignment; class: AdminClass; analysis: AssignmentGradeAnalysis; rows: Array<Record<string, unknown>> }>(`/api/admin/assignments/${assignmentId}/grades`),
-  assignmentGradesCsvUrl: (assignmentId: number) => `/api/admin/assignments/${assignmentId}/grades.csv`,
-  exportScoreManagerCommands: (assignmentId: number, params: { field: string; command_type: 'regular' | 'lab'; group_same_score: boolean }) => {
+  setMakeupPermission: (assignmentId: number, rosterId: number, allowed: boolean) =>
+    request<{ makeup_allowed: boolean }>(`/api/admin/assignments/${assignmentId}/students/${rosterId}/makeup`, { method: 'PATCH', body: JSON.stringify({ allowed }) }),
+  assignmentGradesCsvUrl: (assignmentId: number, factor = 1) => `/api/admin/assignments/${assignmentId}/grades.csv?score_factor=${encodeURIComponent(factor)}`,
+  exportScoreManagerCommands: (assignmentId: number, params: { field: string; command_type: 'regular' | 'lab'; group_same_score: boolean; score_factor: number }) => {
     const query = new URLSearchParams({
       field: params.field,
+      score_factor: String(params.score_factor),
       command_type: params.command_type,
       group_same_score: params.group_same_score ? 'true' : 'false'
     })

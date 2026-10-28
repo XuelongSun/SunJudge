@@ -1,7 +1,16 @@
 """Read-only deadline presentation; never overwrite a teacher's grade."""
 from datetime import UTC, datetime
 
-from ..models import AssignmentGrade, GradingResult, Submission
+from ..models import AssignmentGrade, AssignmentStudentOverride, GradingResult, Submission
+
+
+def student_override(assignment_id, student_user_id):
+    return AssignmentStudentOverride.query.filter_by(assignment_id=assignment_id, student_user_id=student_user_id).first()
+
+
+def makeup_allowed(assignment_id, student_user_id):
+    override = student_override(assignment_id, student_user_id)
+    return bool(override and override.makeup_allowed)
 
 
 def student_deadline_state(assignment, student_user_id: int, grade: AssignmentGrade | None, requirements: list, now=None) -> dict:
@@ -14,6 +23,10 @@ def student_deadline_state(assignment, student_user_id: int, grade: AssignmentGr
     ).all()
     # A newer upload/draft must not erase an already confirmed submission.
     completed = required.issubset({item.submission_item_key for item in confirmed}) if required else bool(confirmed)
+    override = student_override(assignment.id, student_user_id)
+    preserved = bool(override and override.preserved_submission_at)
+    completed = completed or preserved
+    allowed = bool(override and override.makeup_allowed)
     deadline = assignment.deadline
     if deadline and deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=UTC)
@@ -21,6 +34,7 @@ def student_deadline_state(assignment, student_user_id: int, grade: AssignmentGr
     if current_time.tzinfo is None:
         current_time = current_time.replace(tzinfo=UTC)
     has_grade = grade is not None and (grade.final_score is not None or grade.status == GradingResult.STATUS_PUBLISHED)
-    expired = bool(deadline and current_time > deadline and not assignment.allow_late and not completed and not has_grade)
+    expired = bool(deadline and current_time > deadline and not assignment.allow_late and not allowed and not completed and not has_grade)
     score = (grade.final_score or 0) if grade and grade.status == GradingResult.STATUS_PUBLISHED else (0 if expired else None)
-    return {"is_expired": expired, "display_score": score}
+    return {"is_expired": expired, "display_score": score, "makeup_allowed": allowed,
+            "submission_complete": completed, "submission_preserved": preserved}

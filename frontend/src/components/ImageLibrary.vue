@@ -40,9 +40,9 @@ onMounted(refresh)
     <div class="toolbar-actions">
       <el-button type="primary" :disabled="loading" @click="input?.click()">上传图片</el-button>
       <el-button :disabled="loading" @click="refresh">刷新</el-button>
-      <span>{{ images.length }} 张 · {{ (images.reduce((sum, image) => sum + image.file_size, 0) / 1024 / 1024).toFixed(1) }} MB</span>
+      <span>{{ images.length }} 张 · {{ (images.reduce((sum, image) => sum + image.file_size, 0) / 1024 / 1024).toFixed(1) }}/{{ role === 'student' ? 30 : 500 }} MB</span>
     </div>
-    <p class="muted-line">PNG/JPEG，单张 ≤ 5 MB；图片库上限 1000 张 / 500 MB。点击图片可预览，仍被作业或草稿引用的图片不能删除。</p>
+    <p class="muted-line">PNG/JPEG · 单张 ≤ 5 MB</p>
     <input ref="input" type="file" accept="image/png,image/jpeg" multiple hidden @change="upload" />
     <div class="teacher-image-grid">
       <article v-for="(image, index) in images" :key="image.id" class="teacher-image-card">

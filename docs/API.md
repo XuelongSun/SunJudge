@@ -36,6 +36,16 @@
 
 ## 作业创建与发布
 
+### 作业资料（独立主说明与附件）
+
+- 主说明始终使用Assignment的`description/description_format`和既有Markdown说明草稿接口，附件不替代主说明。
+- `POST /teacher/code-templates/validate`：仅已审批教师，multipart `file`，返回200 `{template:{id,filename,file_size,content,purpose:""}}`，只校验不保存。支持UTF-8（允许BOM）`.py/.md`，单个1MiB，禁止路径、无效文件名、空白和二进制控制字符，不会编译或运行。
+- 创建/更新作业传`code_templates:[{filename,content,purpose?}]`，最多4个附件，主说明不计数。用途为可选单行文字，最多120字，服务端去除首尾空白；文件名大小写不敏感且不得重复。`is_main:true`不再接受，禁止附件充当主说明。服务端重算SHA256派生ID及大小，重命名会改变ID。创建省略为空，更新省略保留，传[]移除全部；修改已发布作业仍通过require_resubmission选择是否重交。
+- 作业列表仅返回`code_templates:[{id,filename,file_size,purpose,url,preview_url}]`；`GET /admin/assignments/{id}/code-templates`仅所属已审批教师，返回`{templates}`完整正文供编辑，接口保留原code-templates名称。
+- `GET /assignments/{id}/code-templates/{template_id}/preview`返回`{template:{id,filename,file_size,content,purpose}}`；`/download`返回UTF-8附件（.md为text/markdown、.py为text/x-python）。二者均仅所属教师或已发布作业的本班学生可读，private/no-store、nosniff；下载另设置attachment。学生草稿/越权/非法或移除ID为404，未审批教师403。
+- Markdown附件配图须使用本人教师图片库，保存时校验归属，读取/删除引用保护包括所有Markdown附件；不自动上传本地图片或运行原始HTML。
+- 数据迁移`c9e53f10642d`仅取消旧is_main标记并补充purpose，保留原description、说明草稿及全部附件ID/正文，不用自动选中的Markdown覆盖原说明。历史5附件全部保留，再次编辑保存须整理到4个以内。无数据库结构变化，不改学生提交或成绩。AI上下文只使用独立description。
+
 GET/POST `/admin/classes/{class_id}/assignments`；PATCH/DELETE `/admin/assignments/{assignment_id}`；POST `/admin/assignments/{assignment_id}/publish`。创建返回 201 `{assignment}`，更新/发布返回 200 `{assignment,...}`。当前 type 为 `homework` 或 `lab_report`，状态为 `draft`/`published`，描述/rubric 格式仅 `markdown`。
 
 创建示例：
@@ -58,7 +68,7 @@ GET/POST `/admin/classes/{class_id}/assignments`；PATCH/DELETE `/admin/assignme
 - program_evaluations 指定提交项及 cases，每 case 传 args（shell 风格分词，但不经过 shell 执行）、expected_output、score_percent、timeout_seconds、is_hidden。当前没有 stdin 输入接口。
 - ai_evaluations 模块指定 name/input_file_key/score_percent/input/criteria_items，criteria_items 为 `[{"content":"论述完整","weight":100}]`；权重均须为正。必交提交项权重合计100%，程序/AI模块按文件引用的占比必须匹配对应提交项权重，服务端校验并控制文件满分；不再按旧版“自动占比不足即随意留下人工余分”规则理解。
 - late_policy 保存说明文本，不能认为已实现自动迟交扣分。
-- 已发布作业有批改数据时，修改返回 409 `requires_reset_grading=true`；显式传 `reset_grading:true` 会清除既有批改并重排任务。删除作业会同时删除学生提交、对应文件与相关批改记录。调用前务必理解这些业务副作用。
+- 更新已发布过的作业时传布尔 `require_resubmission`：`false` 保留提交、文件、成绩及原发布时间，即使修改提交项也保留此前已完成状态；`true` 清空批改并将文件置为待确认，保留文件和在线草稿供学生重新确认，不立即重跑。前端保存草稿使用false，重新发布时让教师选择；`POST /publish` 同样支持此字段。旧客户端未传新字段时保留原409确认和 `reset_grading:true` 重评兼容行为。删除作业仍删除提交、文件和批改记录。
 
 ## 学生上传与确认
 
@@ -89,7 +99,13 @@ curl -b cookies.txt -H "Origin: $BASE" -X POST "$BASE/api/assignments/1/confirm-
 
 GET `/admin/assignments/{assignment_id}/grades` 返回 `{assignment,class,analysis,rows}`；analysis 包含完成人数、平均分、发布后/截止前平均提交天数等，rows 包含 roster、student_state、submitted_at、assignment_grade、exportable。
 
-GET `/admin/assignments/{assignment_id}/grades.csv` 返回 UTF-8 BOM CSV 附件。GET `/scoremanager-commands?field=homework&command_type=regular&group_same_score=true` 返回 `{assignment,export}`：export 含 commands（文本）、lines（列表）、exported_count、skipped。command_type 为 regular/lab（兼容 type），普通默认 homework，实验默认作业 code；普通同分默认 brd，实验逐条 lab rd。非法学生编号阻止导出（400），无已复核/已发布最终分的名单列于 skipped。只生成文本，从不调用 CLI。
+GET `/admin/assignments/{assignment_id}/grades.csv?score_factor=1` 返回 UTF-8 BOM CSV 附件，独立列出原始成绩、比例因子、最终成绩。GET `/scoremanager-commands?field=homework&command_type=regular&group_same_score=true&score_factor=1` 返回 `{assignment,export}`：export 含score_factor、commands（文本）、lines（列表）、exported_count、skipped。比例因子默认1，必须为0到1000之间的有限数字，非法400；使用Decimal乘法和ROUND_HALF_UP，折算结果固定两位小数，仅导出已复核/已发布成绩，不写回原始分数或影响统计。command_type为regular/lab（兼容type），普通默认homework，实验默认作业code；合并同分时分别使用brd/lab brd，按折算后成绩分组。非法学生编号阻止导出（400），无最终成绩名单列于skipped。前端支持复制全部命令，下载的TXT追加`exit -s`供手动批量导入并保存退出；平台不调用CLI，重复导入可能重复记分。
+
+## 指定学生补交
+
+`PATCH /admin/assignments/{assignment_id}/students/{roster_id}/makeup`，JSON `{"allowed":true}` 开放、false撤销，仅所属教师可操作。只允许已截止且已发布的作业，名单项须已绑定并加入本班；未截止、无截止或未注册400，他班/他教师404，已完成或已有已发布反馈409（需先退回）。返回`{makeup_allowed}`。
+
+学生收到权限后可上传文件、在线编辑/插图及确认；一次成功确认后权限消耗，仍受班级、文件及已发布成绩校验约束。Submission保留实际submitted_at，新增is_makeup及effective_submitted_at：补交时后者冻结为确认时作业截止日期。教师列表行新增submitted_at（完成时间/补交有效时间）、is_makeup、makeup_allowed；学生Assignment新增makeup_allowed、submission_complete和submission_preserved。指标和CSV使用有效时间并标注补交；旧提交有效时间回退submitted_at。补交授权期间未完成的学生计入待提交，00仍不参与班级统计与导出。
 
 ## 教师 DeepSeek 配置
 
@@ -121,6 +137,6 @@ GET/PUT `/admin/llm-config`，仅教师自身。PUT 为 `{base_url,model,api_key
 
 ## 学生图片库（2026-10-11）
 
-`GET /student/images`、`POST /student/images`（multipart file）及`DELETE /student/images/{id}`与教师图片库响应结构一致，仅学生本人可管理；教师端路径仍只允许教师使用，不能用切换路径跨角色访问。新字段markdown_assets.student_user_id通过迁移f5b20c8d316a回填既有报告图片所有者。GET图片内容允许学生本人，教师只有在自己的已确认作业快照中实际引用该图片时可读；其他学生及不相关教师404。图片可跨自己的报告复用，删除引用中的图片409。独立库上传不受某次作业截止限制；作业草稿编辑、图片上传与确认仍执行原截止/成绩发布限制。个人库1000张/500MB，报告引用50张/50MB。
+`GET /student/images`、`POST /student/images`（multipart file）及`DELETE /student/images/{id}`与教师图片库响应结构一致，仅学生本人可管理；教师端路径仍只允许教师使用，不能用切换路径跨角色访问。新字段markdown_assets.student_user_id通过迁移f5b20c8d316a回填既有报告图片所有者。GET图片内容允许学生本人，教师只有在自己的已确认作业快照中实际引用该图片时可读；其他学生及不相关教师404。图片可跨自己的报告复用，删除引用中的图片409。独立库上传不受某次作业截止限制；作业草稿编辑、图片上传与确认仍执行截止/补交权限/成绩发布限制。学生个人库1000张/30MB（教师仍500MB），报告引用50张/50MB；旧库超额不删图，禁止新增直到释放容量。两种上传路径共用配额检查。
 
 直接上传.md而未打开在线编辑器时，确认提交也会解析库图片引用并记录快照引用ID，执行相同所有权及配额检查；不接受本地或外部图片引用。旧的个人图片自动归库后不再被未引用图片定时清理删除。

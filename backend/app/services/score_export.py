@@ -4,6 +4,7 @@ import csv
 from collections import defaultdict
 from datetime import UTC, datetime
 from io import StringIO
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import re
 from typing import Any
 
@@ -22,7 +23,22 @@ def build_assignment_gradebook(assignment: Assignment) -> dict[str, Any]:
     return {"summary": _summarize_rows(assignment, rows), "rows": rows}
 
 
-def build_assignment_grade_csv(assignment: Assignment) -> str:
+def parse_score_factor(value=1) -> Decimal:
+    try:
+        factor = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("比例因子必须为 0 到 1000 之间的数字。")
+    if not factor.is_finite() or factor < 0 or factor > 1000:
+        raise ValueError("比例因子必须为 0 到 1000 之间的数字。")
+    return factor
+
+
+def scaled_score(score, factor) -> str:
+    return format((Decimal(str(score)) * parse_score_factor(factor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), ".2f")
+
+
+def build_assignment_grade_csv(assignment: Assignment, score_factor=1) -> str:
+    factor = parse_score_factor(score_factor)
     gradebook = build_assignment_gradebook(assignment)
     output = StringIO()
     writer = csv.writer(output)
@@ -38,7 +54,9 @@ def build_assignment_grade_csv(assignment: Assignment) -> str:
             "发布后提交天数",
             "截止前提交天数",
             "批改状态",
-            "最终分",
+            "原始成绩",
+            "比例因子",
+            "最终成绩",
             "自动分",
             "AI建议分",
             "教师评语",
@@ -55,11 +73,13 @@ def build_assignment_grade_csv(assignment: Assignment) -> str:
                 roster.get("source_class") or "",
                 roster.get("student_id") or "",
                 row["student_state"],
-                row["submitted_at"] or "",
+                (row["submitted_at"] or "") + (" (补交)" if row["is_makeup"] else ""),
                 _format_optional_number(row["submit_days_after_publish"]),
                 _format_optional_number(row["submit_days_before_deadline"]),
                 row["grade_status"],
                 _format_optional_number(grade.get("final_score")),
+                str(factor),
+                scaled_score(grade["final_score"], factor) if _has_exportable_final_score(grade) else "",
                 _format_optional_number(grade.get("auto_score")),
                 _format_optional_number(grade.get("llm_score")),
                 grade.get("teacher_comment") or "",
@@ -73,7 +93,9 @@ def build_scoremanager_export(
     field: str,
     command_type: str = "regular",
     group_same_score: bool = True,
+    score_factor=1,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    factor = parse_score_factor(score_factor)
     field = field.strip()
     if not SCORE_FIELD_PATTERN.fullmatch(field):
         return None, [{"student_id": "", "message": "ScoreManager field must use letters, digits, underscores or hyphens."}]
@@ -103,29 +125,31 @@ def build_scoremanager_export(
                 }
             )
             continue
-        exportable_rows.append({**row, "short_no": short_no, "score_text": _format_score(float(grade["final_score"]))})
+        exportable_rows.append({**row, "short_no": short_no, "score_text": scaled_score(grade["final_score"], factor)})
 
     if invalid_students:
         return None, invalid_students
 
     lines: list[str] = []
-    if command_type == "lab":
+    if command_type == "lab" and not group_same_score:
         lines = [f"lab rd {row['short_no']} {field} {row['score_text']}" for row in exportable_rows]
     elif group_same_score:
         grouped: dict[str, list[str]] = defaultdict(list)
         for row in exportable_rows:
             grouped[str(row["score_text"])].append(str(row["short_no"]))
         for score_text, numbers in grouped.items():
+            prefix = "lab " if command_type == "lab" else ""
             if len(numbers) == 1:
-                lines.append(f"rd {numbers[0]} {field} {score_text}")
+                lines.append(f"{prefix}rd {numbers[0]} {field} {score_text}")
             else:
-                lines.append(f"brd {','.join(numbers)} {field} {score_text}")
+                lines.append(f"{prefix}brd {','.join(numbers)} {field} {score_text}")
     else:
         lines = [f"rd {row['short_no']} {field} {row['score_text']}" for row in exportable_rows]
 
     return (
         {
             "field": field,
+            "score_factor": str(factor),
             "command_type": command_type,
             "group_same_score": group_same_score,
             "commands": "\n".join(lines),
@@ -159,17 +183,21 @@ def _build_grade_row(assignment: Assignment, roster_entry: ClassRoster) -> dict[
     else:
         student_state = "missing"
 
-    submitted_at = _completed_submission_time(latest_submissions, required_keys) if student_state == "submitted" else None
     grade = (
         AssignmentGrade.query.filter_by(assignment_id=assignment.id, student_user_id=roster_entry.matched_user_id).first()
         if roster_entry.matched_user_id
         else None
     )
+    deadline_state = student_deadline_state(assignment, roster_entry.matched_user_id, grade, requirements)
+    if deadline_state["submission_complete"]:
+        student_state = "submitted"
+    submitted_at = _completed_submission_time(latest_submissions, set() if deadline_state["submission_preserved"] else required_keys) if student_state == "submitted" else None
     return {
         "roster": roster_entry.to_dict(),
         "student_user_id": roster_entry.matched_user_id,
         "student_state": student_state,
-        "is_expired": student_deadline_state(assignment, roster_entry.matched_user_id, grade, requirements)["is_expired"],
+        "is_expired": deadline_state["is_expired"],
+        "is_makeup": student_state == "submitted" and any(s.is_makeup for s in latest_submissions),
         "submitted_at": submitted_at.isoformat() if submitted_at else None,
         "submit_days_after_publish": _days_between(assignment.published_at, submitted_at),
         "submit_days_before_deadline": _days_between(submitted_at, assignment.deadline),
@@ -224,7 +252,7 @@ def _completed_submission_time(submissions: list[Submission], required_keys: set
     ]
     if not confirmed:
         return None
-    return max(_as_utc(submission.submitted_at) for submission in confirmed)
+    return max(_as_utc(submission.effective_submitted_at or submission.submitted_at) for submission in confirmed)
 
 
 def _has_exportable_final_score(grade: dict[str, Any] | AssignmentGrade | None) -> bool:

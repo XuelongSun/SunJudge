@@ -40,27 +40,32 @@
 
 | 方法 | 路径 | 角色 | 请求字段 | JSON 顶层字段 | 实现 |
 | --- | --- | --- | --- | --- | --- |
-| GET | `/api/admin/classes/<int:class_id>/assignments` | teacher, admin | — | assignments, class, message | [list_managed_assignments](../backend/app/routes/assignments.py#L108) |
-| POST | `/api/admin/classes/<int:class_id>/assignments` | teacher | — | assignment, message | [create_assignment](../backend/app/routes/assignments.py#L128) |
-| POST | `/api/admin/assignments/<int:assignment_id>/copy` | teacher | payload.class_id; payload.code | 文件响应 | [copy_assignment](../backend/app/routes/assignments.py#L163) |
-| PATCH | `/api/admin/assignments/<int:assignment_id>` | teacher | payload.reset_grades; payload.reset_grading | assignment, message, requires_reset_grading, rerun_count, reset_grading | [update_assignment](../backend/app/routes/assignments.py#L205) |
-| POST | `/api/admin/assignments/<int:assignment_id>/publish` | teacher | — | assignment, message | [publish_assignment](../backend/app/routes/assignments.py#L268) |
-| DELETE | `/api/admin/assignments/<int:assignment_id>` | teacher | — | class_id, cleanup, message | [delete_assignment](../backend/app/routes/assignments.py#L290) |
-| GET | `/api/admin/assignments/<int:assignment_id>/submissions` | teacher, admin | — | analysis, assignment, message, submissions, test_submissions | [list_assignment_submissions](../backend/app/routes/assignments.py#L314) |
-| GET | `/api/admin/assignments/<int:assignment_id>/grades` | teacher, admin | — | analysis, assignment, class, message, rows | [get_assignment_grades](../backend/app/routes/assignments.py#L371) |
-| GET | `/api/admin/assignments/<int:assignment_id>/grades.csv` | teacher, admin | — | message | [export_assignment_grades_csv](../backend/app/routes/assignments.py#L389) |
-| GET | `/api/admin/assignments/<int:assignment_id>/scoremanager-commands` | teacher, admin | request.args.command_type; request.args.field; request.args.group_same_score; request.args.type | assignment, export, invalid_students, message | [export_assignment_scoremanager_commands](../backend/app/routes/assignments.py#L405) |
-| GET | `/api/admin/llm-config` | teacher | — | config | [get_llm_config](../backend/app/routes/assignments.py#L441) |
-| PUT | `/api/admin/llm-config` | teacher | payload.api_key; payload.base_url; payload.enabled; payload.model; payload.provider | config, message | [save_llm_config](../backend/app/routes/assignments.py#L449) |
-| GET | `/api/admin/submissions/<int:submission_id>/preview` | teacher, admin | — | content, message, previewable, submission | [preview_submission_file](../backend/app/routes/assignments.py#L496) |
-| GET | `/api/admin/submissions/<int:submission_id>/download` | teacher, admin | — | message | [download_submission_file](../backend/app/routes/assignments.py#L520) |
-| POST | `/api/admin/submissions/<int:submission_id>/rerun-grading` | teacher | — | assignment_grade, message, queue_status, submission | [rerun_submission_grading](../backend/app/routes/assignments.py#L533) |
-| POST | `/api/admin/submissions/<int:submission_id>/return` | teacher | — | assignment, cleanup, message | [return_submission_for_resubmit](../backend/app/routes/assignments.py#L556) |
-| PATCH | `/api/admin/submissions/<int:submission_id>/grade` | teacher | payload.feedback; payload.file_reviews; payload.final_score; payload.reason; payload.status; payload.teacher_comment | assignment_grade, grading_result, message, submission | [review_submission_grade](../backend/app/routes/assignments.py#L579) |
-| GET | `/api/classes/<int:class_id>/assignments` | student | — | assignments, class, message | [list_student_assignments](../backend/app/routes/assignments.py#L644) |
-| POST | `/api/assignments/<int:assignment_id>/read` | student | — | assignment, message, read | [mark_assignment_read](../backend/app/routes/assignments.py#L665) |
-| POST | `/api/assignments/<int:assignment_id>/submissions` | student | request.files.file; request.form.item_key; request.form.submission_item_key | assignment_grade, details, message, submission | [submit_assignment](../backend/app/routes/assignments.py#L680) |
-| POST | `/api/assignments/<int:assignment_id>/confirm-submission` | student | — | assignment, assignment_grade, details, message, missing_keys, queue_status | [confirm_assignment_submission](../backend/app/routes/assignments.py#L773) |
+| GET | `/api/admin/classes/<int:class_id>/assignments` | teacher, admin | — | assignments, class, message | [list_managed_assignments](../backend/app/routes/assignments.py#L111) |
+| POST | `/api/admin/classes/<int:class_id>/assignments` | teacher | — | assignment, message | [create_assignment](../backend/app/routes/assignments.py#L131) |
+| POST | `/api/admin/assignments/<int:assignment_id>/copy` | teacher | payload.class_id; payload.code | 文件响应 | [copy_assignment](../backend/app/routes/assignments.py#L166) |
+| POST | `/api/teacher/code-templates/validate` | teacher | request.files.file | template | [validate_code_template_upload](../backend/app/routes/assignments.py#L208) |
+| GET | `/api/admin/assignments/<int:assignment_id>/code-templates` | teacher | — | templates | [edit_assignment_code_templates](../backend/app/routes/assignments.py#L230) |
+| GET | `/api/assignments/<int:assignment_id>/code-templates/<string:template_id>/download` | teacher, student | — | template | [download_assignment_code_template](../backend/app/routes/assignments.py#L243) |
+| GET | `/api/assignments/<int:assignment_id>/code-templates/<string:template_id>/preview` | teacher, student | — | template | [download_assignment_code_template](../backend/app/routes/assignments.py#L243) |
+| PATCH | `/api/admin/assignments/<int:assignment_id>` | teacher | payload.require_resubmission; payload.reset_grades; payload.reset_grading | assignment, message, requires_reset_grading, rerun_count, reset_grading | [update_assignment](../backend/app/routes/assignments.py#L264) |
+| POST | `/api/admin/assignments/<int:assignment_id>/publish` | teacher | payload.require_resubmission | assignment, message | [publish_assignment](../backend/app/routes/assignments.py#L334) |
+| DELETE | `/api/admin/assignments/<int:assignment_id>` | teacher | — | class_id, cleanup, message | [delete_assignment](../backend/app/routes/assignments.py#L365) |
+| GET | `/api/admin/assignments/<int:assignment_id>/submissions` | teacher, admin | — | analysis, assignment, message, submissions, test_submissions | [list_assignment_submissions](../backend/app/routes/assignments.py#L390) |
+| PATCH | `/api/admin/assignments/<int:assignment_id>/students/<int:roster_id>/makeup` | teacher | payload.allowed | 文件响应 | [set_makeup_permission](../backend/app/routes/assignments.py#L455) |
+| GET | `/api/admin/assignments/<int:assignment_id>/grades` | teacher, admin | — | analysis, assignment, class, message, rows | [get_assignment_grades](../backend/app/routes/assignments.py#L487) |
+| GET | `/api/admin/assignments/<int:assignment_id>/grades.csv` | teacher, admin | request.args.score_factor | message | [export_assignment_grades_csv](../backend/app/routes/assignments.py#L505) |
+| GET | `/api/admin/assignments/<int:assignment_id>/scoremanager-commands` | teacher, admin | request.args.command_type; request.args.field; request.args.group_same_score; request.args.score_factor; request.args.type | assignment, export, invalid_students, message | [export_assignment_scoremanager_commands](../backend/app/routes/assignments.py#L524) |
+| GET | `/api/admin/llm-config` | teacher | — | config | [get_llm_config](../backend/app/routes/assignments.py#L565) |
+| PUT | `/api/admin/llm-config` | teacher | payload.api_key; payload.base_url; payload.enabled; payload.model; payload.provider | config, message | [save_llm_config](../backend/app/routes/assignments.py#L573) |
+| GET | `/api/admin/submissions/<int:submission_id>/preview` | teacher, admin | — | content, message, previewable, submission | [preview_submission_file](../backend/app/routes/assignments.py#L620) |
+| GET | `/api/admin/submissions/<int:submission_id>/download` | teacher, admin | — | message | [download_submission_file](../backend/app/routes/assignments.py#L644) |
+| POST | `/api/admin/submissions/<int:submission_id>/rerun-grading` | teacher | — | assignment_grade, message, queue_status, submission | [rerun_submission_grading](../backend/app/routes/assignments.py#L657) |
+| POST | `/api/admin/submissions/<int:submission_id>/return` | teacher | — | assignment, cleanup, message | [return_submission_for_resubmit](../backend/app/routes/assignments.py#L680) |
+| PATCH | `/api/admin/submissions/<int:submission_id>/grade` | teacher | payload.feedback; payload.file_reviews; payload.final_score; payload.reason; payload.status; payload.teacher_comment | assignment_grade, grading_result, message, submission | [review_submission_grade](../backend/app/routes/assignments.py#L703) |
+| GET | `/api/classes/<int:class_id>/assignments` | student | — | assignments, class, message | [list_student_assignments](../backend/app/routes/assignments.py#L768) |
+| POST | `/api/assignments/<int:assignment_id>/read` | student | — | assignment, message, read | [mark_assignment_read](../backend/app/routes/assignments.py#L789) |
+| POST | `/api/assignments/<int:assignment_id>/submissions` | student | request.files.file; request.form.item_key; request.form.submission_item_key | assignment_grade, details, message, submission | [submit_assignment](../backend/app/routes/assignments.py#L804) |
+| POST | `/api/assignments/<int:assignment_id>/confirm-submission` | student | — | assignment, assignment_grade, details, message, missing_keys, queue_status | [confirm_assignment_submission](../backend/app/routes/assignments.py#L897) |
 
 ## markdown_documents
 

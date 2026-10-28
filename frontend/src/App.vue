@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput } from './reportTemplates'
 import { aiResultRows } from './gradingPresentation'
 import { progressPercent, filenamePreview, insertAtSelection } from './presentation'
 import ProgressCard from './components/ProgressCard.vue'
+import AssignmentMaterials from './components/AssignmentMaterials.vue'
+import MaterialEditor from './components/MaterialEditor.vue'
+import FilePreviewDialog from './components/FilePreviewDialog.vue'
+import type { CodeTemplate } from './api'
 import { renderContent } from './markdown'
 import MarkdownEditor from './components/MarkdownEditor.vue'
 import ImageLibrary from './components/ImageLibrary.vue'
@@ -141,6 +145,13 @@ const rosterDrawerVisible = ref(false)
 const assignmentsDrawerVisible = ref(false)
 const assignmentDialogVisible = ref(false)
 const assignmentPreviewDrawerVisible = ref(false)
+const codeTemplates = ref<CodeTemplate[]>([])
+const codeTemplateInput = ref<HTMLInputElement>()
+const codeTemplatesLoading = ref(false)
+const codeTemplatesReady = ref(false)
+const materialEditorVisible = ref(false)
+const editingMaterial = ref<CodeTemplate | null>(null)
+const teacherMaterialPreview = ref<{ selectFile: (file: CodeTemplate) => Promise<void>; downloadSelected: (file: CodeTemplate) => void }>()
 const submissionRequirementDialogVisible = ref(false)
 const programEvaluationDialogVisible = ref(false)
 const aiEvaluationDialogVisible = ref(false)
@@ -176,6 +187,9 @@ const reviewingSubmissionRow = ref<AssignmentSubmissionRow | null>(null)
 const reviewFileForms = ref<FileReview[]>([])
 const previewingSubmission = ref<Submission | null>(null)
 const submissionPreview = ref<SubmissionPreview | null>(null)
+const submissionPreviewError = ref('')
+let submissionPreviewRequest = 0
+watch(submissionPreviewDialogVisible, visible => { if (!visible) submissionPreviewRequest++ })
 const llmConfig = ref<TeacherLLMConfig | null>(null)
 const scoreManagerCommands = ref('')
 
@@ -279,6 +293,7 @@ const gradeReviewForm = reactive({
 })
 
 const scoreManagerForm = reactive({
+  score_factor: 1,
   field: 'homework',
   command_type: 'regular' as 'regular' | 'lab',
   group_same_score: true
@@ -382,7 +397,7 @@ const currentRoleLabel = computed(() => roleLabelMap[currentUser.value?.role ?? 
 
 const assignmentTypeOptions = [
   { label: '作业', value: 'homework' },
-  { label: '实验报告', value: 'lab_report' }
+  { label: '实验', value: 'lab_report' }
 ]
 
 const extensionOptions = [
@@ -463,6 +478,7 @@ function hasAllRequiredUploads(assignment: Assignment) {
 }
 
 function hasAllRequiredConfirmedSubmissions(assignment: Assignment) {
+  if (assignment.submission_preserved) return true
   if (Object.values(assignment.markdown_drafts ?? {}).some(draft => draft.pending_changes)) return false
   const required = assignment.submission_requirements.filter((item) => item.required)
   const confirmedKeys = confirmedRequiredKeys(assignment)
@@ -471,6 +487,7 @@ function hasAllRequiredConfirmedSubmissions(assignment: Assignment) {
 
 function submissionStatusLabel(assignment: Assignment) {
   if (hasAllRequiredConfirmedSubmissions(assignment)) {
+    if ((assignment.submissions ?? []).some(item => item.is_makeup)) return '已补交'
     return (assignment.submissions ?? []).some((submission) => submission.status === 'late') ? '已迟交' : '已提交'
   }
   if (hasAllRequiredUploads(assignment)) {
@@ -692,11 +709,21 @@ function studentClassAverageScore(courseClass: PublicClass) {
 }
 
 function exportAssignmentGradesCsv() {
-  if (!selectedAssignmentId.value) {
+  if (!selectedAssignmentId.value || !validExportFactor()) {
     return
   }
-  window.open(api.assignmentGradesCsvUrl(selectedAssignmentId.value), '_blank')
+  window.open(api.assignmentGradesCsvUrl(selectedAssignmentId.value, scoreManagerForm.score_factor), '_blank')
 }
+
+function validExportFactor() {
+  if (!Number.isFinite(scoreManagerForm.score_factor) || scoreManagerForm.score_factor < 0 || scoreManagerForm.score_factor > 1000) {
+    ElMessage.warning('比例因子必须为 0 到 1000 之间的数字')
+    return false
+  }
+  return true
+}
+
+watch(scoreManagerForm, () => { scoreManagerCommands.value = '' })
 
 async function openScoreManagerDialog() {
   if (!selectedAssignment.value || !selectedAssignmentId.value) {
@@ -711,9 +738,7 @@ async function openScoreManagerDialog() {
 }
 
 async function generateScoreManagerCommands() {
-  if (!selectedAssignmentId.value) {
-    return
-  }
+  if (!selectedAssignmentId.value || !validExportFactor()) return false
   submissionLoading.value = true
   try {
     const result = await api.exportScoreManagerCommands(selectedAssignmentId.value, { ...scoreManagerForm })
@@ -721,21 +746,45 @@ async function generateScoreManagerCommands() {
     if (!result.export.exported_count) {
       ElMessage.warning('暂无已复核或已发布的最终成绩可导出')
     }
+    return true
   } catch (error) {
     scoreManagerCommands.value = ''
     ElMessage.error((error as Error).message)
+    return false
   } finally {
     submissionLoading.value = false
   }
 }
 
 async function copyScoreManagerCommands() {
+  if (!await generateScoreManagerCommands()) return
   if (!scoreManagerCommands.value) {
     ElMessage.warning('暂无可复制命令')
     return
   }
-  await navigator.clipboard.writeText(scoreManagerCommands.value)
-  ElMessage.success('命令已复制')
+  try {
+    await navigator.clipboard.writeText(scoreManagerCommands.value + '\n')
+    ElMessage.success('整批命令已复制')
+  } catch { ElMessage.warning('无法访问剪贴板，请选择命令文本复制，或下载 TXT') }
+}
+
+async function downloadScoreManagerCommands() {
+  if (!await generateScoreManagerCommands() || !scoreManagerCommands.value) return
+  const url = URL.createObjectURL(new Blob([scoreManagerCommands.value + '\nexit -s\n'], { type: 'text/plain;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'scoremanager_commands.txt'
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function toggleMakeupPermission(row: AssignmentSubmissionRow) {
+  if (!selectedAssignmentId.value) return
+  try {
+    await api.setMakeupPermission(selectedAssignmentId.value, row.roster.id, !row.makeup_allowed)
+    ElMessage.success(row.makeup_allowed ? '已取消补交权限' : '已允许该学生补交')
+    await loadSubmissions(selectedAssignmentId.value)
+  } catch (error) { ElMessage.error((error as Error).message) }
 }
 function currentReviewSubmissions() {
   return reviewingSubmissionRow.value?.submissions ?? (reviewingSubmission.value ? [reviewingSubmission.value] : [])
@@ -975,23 +1024,23 @@ function defaultReviewComment(submission: Submission, kind: FileReview['review_k
   }
   return 'AI 评测建议等待教师复核'
 }
-function assignmentMarkdown(assignment: Assignment) {
+function assignmentMarkdown(assignment: Assignment, includeDescription = true) {
   const courseClass = [...adminClasses.value, ...studentClasses.value].find(item => item.id === assignment.class_id)
   return homeworkMarkdown({
     title: assignment.title, course: courseClass?.course.name ?? '-',
     teacher: courseClass?.course.teacher_name ?? currentUser.value?.username ?? '-',
     publishedAt: assignment.published_at ? reportDate(assignment.published_at) : '未发布',
     deadline: reportDate(assignment.deadline), maxScore: assignment.max_score,
-    description: assignment.description
+    description: includeDescription ? assignment.description : null
   })
 }
 
-function assignmentFormMarkdown() {
+function assignmentFormMarkdown(includeDescription = true) {
   return assignmentMarkdown({
     ...previewAssignment.value, title: assignmentForm.title || '作业标题',
     description: assignmentForm.description, deadline: deadlinePayload(),
     max_score: Number(assignmentForm.max_score)
-  })
+  }, includeDescription)
 }
 
 function generatedFeedbackReport() {
@@ -1001,7 +1050,7 @@ function generatedFeedbackReport() {
   return feedbackMarkdown({
     name: row?.roster.student_name ?? reviewingSubmission.value?.student?.student_name ?? '学生',
     studentNumber: row?.roster.student_number ?? '-', code: assignment?.code ?? '-',
-    submittedAt: reportDate(reviewingSubmission.value?.submitted_at ?? null),
+    submittedAt: reportDate(reviewingSubmission.value?.effective_submitted_at ?? reviewingSubmission.value?.submitted_at ?? null) + (reviewingSubmission.value?.is_makeup ? ' (补交)' : ''),
     deadline: reportDate(assignment?.deadline ?? null), score: reviewTotalScore.value,
     course: courseClass?.course.name ?? '-', teacher: courseClass?.course.teacher_name ?? '-',
     publishedAt: reportDate(new Date().toISOString()), comment: gradeReviewForm.teacher_comment || '',
@@ -1012,31 +1061,6 @@ function generatedFeedbackReport() {
     }))
   })
 }
-function submissionPreviewMarkdown() {
-  if (!previewingSubmission.value || !submissionPreview.value?.content) {
-    return ''
-  }
-  if (previewingSubmission.value.original_filename.toLowerCase().endsWith('.md')) {
-    return submissionPreview.value.content
-  }
-  const language = previewLanguage(previewingSubmission.value.original_filename)
-  return `\`\`\`${language}\n${submissionPreview.value.content}\n\`\`\``
-}
-
-function previewLanguage(filename: string) {
-  const lower = filename.toLowerCase()
-  if (lower.endsWith('.py')) {
-    return 'python'
-  }
-  if (lower.endsWith('.c')) {
-    return 'c'
-  }
-  if (lower.endsWith('.cpp') || lower.endsWith('.cc')) {
-    return 'cpp'
-  }
-  return ''
-}
-
 async function selectStudentClass(courseClass: PublicClass) {
   if (selectedStudentClassId.value === courseClass.id) {
     selectedStudentClassId.value = undefined
@@ -1118,6 +1142,9 @@ async function submitRegister() {
 
 async function logout() {
   await api.logout()
+  materialEditorVisible.value = false
+  editingMaterial.value = null
+  codeTemplates.value = []
   currentUser.value = null
   teachers.value = []
   adminClasses.value = []
@@ -1507,13 +1534,20 @@ async function openAssignmentDialog(courseClass: AdminClass, assignment?: Assign
     assignmentForm.ai_evaluations = assignment.ai_evaluations.map((item) => normalizeAiEvaluationForForm(item))
   }
   teacherMarkdownDocument.value = null
+  codeTemplates.value = []
+  codeTemplatesReady.value = false
   const session = ++teacherEditorSession
   assignmentDialogVisible.value = true
   try {
-    const result = await api.openMarkdownDocument({ class_id: courseClass.id, assignment_id: assignment?.id, kind: 'description' })
+    const [result, templates] = await Promise.all([
+      api.openMarkdownDocument({ class_id: courseClass.id, assignment_id: assignment?.id, kind: 'description' }),
+      assignment ? api.editCodeTemplates(assignment.id) : Promise.resolve({ templates: [] as CodeTemplate[] })
+    ])
     if (session !== teacherEditorSession || !assignmentDialogVisible.value) return
     teacherMarkdownDocument.value = result.document
     assignmentForm.description = result.document.content
+    codeTemplates.value = templates.templates
+    codeTemplatesReady.value = true
   } catch (error) { ElMessage.error((error as Error).message) }
 }
 
@@ -1529,6 +1563,7 @@ function openAssignmentPreview(assignment?: Assignment) {
 
 function assignmentPayload(status: Assignment['status']): AssignmentPayload {
   return {
+    code_templates: codeTemplates.value,
     markdown_document_id: teacherMarkdownDocument.value?.id,
     title: assignmentForm.title,
     code: assignmentForm.code,
@@ -1826,29 +1861,91 @@ function removeAiEvaluation(index: number) {
   assignmentForm.ai_evaluations.splice(index, 1)
 }
 
+function chooseResubmission() {
+  return ElMessageBox.confirm(
+        '重交会清空成绩并保留文件；保留提交则维持现状。',
+        '是否需要学生重交？',
+        { confirmButtonText: '要求学生重交', cancelButtonText: '保留已有提交', distinguishCancelAndClose: true, closeOnClickModal: false, type: 'warning' }
+      ).then(() => true).catch((action) => { if (action === 'cancel') return false; throw action })
+}
+
+async function uploadCodeTemplates(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length || codeTemplatesLoading.value || !codeTemplatesReady.value) return
+  const session = teacherEditorSession
+  const next = [...codeTemplates.value]
+  codeTemplatesLoading.value = true
+  try {
+    for (const file of files) {
+      if (!/\.(py|md)$/i.test(file.name) || file.size > 1024 * 1024) throw new Error('请选择单个不超过 1 MB 的 .py / .md 文件')
+      const { template } = await api.validateCodeTemplate(file)
+      const index = next.findIndex(item => item.filename.toLowerCase() === template.filename.toLowerCase())
+      if (index >= 0) next.splice(index, 1, { ...template, purpose: next[index]?.purpose ?? '' })
+      else next.push(template)
+      if (next.length > 4) throw new Error('每份作业最多提供 4 个附件')
+    }
+    if (session !== teacherEditorSession || !assignmentDialogVisible.value) return
+    codeTemplates.value = next
+    ElMessage.success('资料已加入')
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { codeTemplatesLoading.value = false }
+}
+
+function removeCodeTemplate(index: number) {
+  codeTemplates.value.splice(index, 1)
+}
+
+function openMaterialEditor(file: CodeTemplate) {
+  if (codeTemplatesLoading.value || typeof file.content !== 'string') return
+  editingMaterial.value = { ...file }
+  materialEditorVisible.value = true
+}
+
+function newMaterial() {
+  if (codeTemplatesLoading.value || !codeTemplatesReady.value || codeTemplates.value.length >= 4) return
+  const base = '附件'
+  let filename = `${base}.md`
+  let suffix = 2
+  while (codeTemplates.value.some(file => file.filename.toLowerCase() === filename.toLowerCase())) filename = `${base}${suffix++}.md`
+  editingMaterial.value = { id: '', filename, content: '', file_size: 0, purpose: '' }
+  materialEditorVisible.value = true
+}
+
+function applyMaterialEdit(update: { originalId: string; file: CodeTemplate }) {
+  if (!update.originalId) {
+    if (codeTemplates.value.length >= 4) { ElMessage.warning('每份作业最多 4 个附件'); return }
+    if (codeTemplates.value.some(file => file.filename.toLowerCase() === update.file.filename.toLowerCase())) { ElMessage.warning('文件名已存在'); return }
+    codeTemplates.value.push(update.file)
+    return
+  }
+  const index = codeTemplates.value.findIndex(file => file.id === update.originalId)
+  if (index < 0) { ElMessage.warning('附件已变更，请重新打开'); return }
+  if (codeTemplates.value.some((file, i) => i !== index && file.filename.toLowerCase() === update.file.filename.toLowerCase())) { ElMessage.warning('文件名已存在'); return }
+  codeTemplates.value.splice(index, 1, update.file)
+}
+
 async function saveAssignment(status: Assignment['status']) {
   if (!selectedClassId.value) {
     return
   }
   try {
+    if (materialEditorVisible.value) { ElMessage.warning('请先完成附件编辑'); return }
+    if (codeTemplatesLoading.value || !codeTemplatesReady.value) { ElMessage.warning('请等待作业资料加载或上传完成'); return }
     if (!teacherMarkdownDocument.value) { ElMessage.error('请等待 Markdown 编辑器加载完成'); return }
     await teacherMarkdownEditor.value?.flush()
     const payload = assignmentPayload(status)
-    let resetGrading = false
-    if (editingAssignmentId.value && editingAssignmentOriginalStatus.value === 'published') {
-      await ElMessageBox.confirm(
-        '已发布作业修改后，重新发布会清空该作业下所有已反馈、已保存和自动批改结果，并重新执行程序/AI评测。教师需要重新复核。',
-        '确认修改已发布作业',
-        { confirmButtonText: '确认重置并保存', cancelButtonText: '取消', type: 'warning' }
-      )
-      resetGrading = true
+    let requireResubmission: boolean | undefined
+    if (editingAssignmentId.value && (editingAssignmentOriginalStatus.value === 'published' || managedAssignments.value.find(item => item.id === editingAssignmentId.value)?.published_at)) {
+      requireResubmission = status === 'published' ? await chooseResubmission() : false
     }
     if (editingAssignmentId.value) {
-      await api.updateAssignment(editingAssignmentId.value, { ...payload, reset_grading: resetGrading })
+      await api.updateAssignment(editingAssignmentId.value, { ...payload, require_resubmission: requireResubmission })
     } else {
       await api.createAssignment(selectedClassId.value, payload)
     }
-    ElMessage.success(resetGrading ? '作业已更新，批改结果已重置并重新评测' : status === 'published' ? '作业已发布' : '草稿已保存')
+    ElMessage.success(requireResubmission ? '作业已更新，学生需要重新确认提交' : status === 'published' ? '作业已发布，已有提交已保留' : '草稿已保存')
     assignmentDialogVisible.value = false
     await loadManagedAssignments(selectedClassId.value)
     await loadTeacherDashboard()
@@ -1864,14 +1961,15 @@ async function saveAssignment(status: Assignment['status']) {
 
 async function publishAssignment(row: Assignment) {
   try {
-    await api.publishAssignment(row.id)
+    const requireResubmission = row.published_at ? await chooseResubmission() : false
+    await api.publishAssignment(row.id, requireResubmission)
     ElMessage.success('作业已发布，学生现在可见')
     if (selectedClassId.value) {
       await loadManagedAssignments(selectedClassId.value)
     }
     await loadTeacherDashboard()
   } catch (error) {
-    ElMessage.error((error as Error).message)
+    if (!isDialogCancel(error)) ElMessage.error((error as Error).message)
   }
 }
 
@@ -2030,13 +2128,16 @@ async function saveGradeReview(status: GradingStatus = gradeReviewForm.status) {
 }
 
 async function openSubmissionPreview(submission: Submission) {
+  const request = ++submissionPreviewRequest
   previewingSubmission.value = submission
   submissionPreview.value = null
+  submissionPreviewError.value = ''
   submissionPreviewDialogVisible.value = true
   try {
-    submissionPreview.value = await api.previewSubmission(submission.id)
+    const result = await api.previewSubmission(submission.id)
+    if (request === submissionPreviewRequest && submissionPreviewDialogVisible.value) submissionPreview.value = result
   } catch (error) {
-    ElMessage.error((error as Error).message)
+    if (request === submissionPreviewRequest && submissionPreviewDialogVisible.value) submissionPreviewError.value = (error as Error).message
   }
 }
 
@@ -2147,7 +2248,11 @@ function studentClassRowClassName({ row }: { row: PublicClass }) {
 }
 
 function studentAssignmentRowClassName({ row }: { row: Assignment }) {
-  return row.id === selectedStudentAssignmentId.value ? 'is-selected-row clickable-row' : 'clickable-row'
+  return `${row.id === selectedStudentAssignmentId.value ? 'is-selected-row ' : ''}clickable-row assignment-row--${row.type}`
+}
+
+function teacherAssignmentRowClassName({ row }: { row: Assignment }) {
+  return `clickable-row assignment-row--${row.type}`
 }
 
 function submissionRowClassName({ row }: { row: AssignmentSubmissionRow }) {
@@ -2444,14 +2549,19 @@ onMounted(() => {
             :row-class-name="studentAssignmentRowClassName"
             @row-click="selectStudentAssignment"
           >
-            <el-table-column prop="title" label="作业" min-width="170" />
+            <el-table-column label="作业 / 实验" min-width="210">
+              <template #default="{ row }"><div class="assignment-title"><el-tag :type="row.type === 'lab_report' ? 'success' : 'primary'" effect="dark">{{ assignmentTypeLabel(row.type) }}</el-tag><strong>{{ row.title }}</strong></div></template>
+            </el-table-column>
             <el-table-column label="截止时间" min-width="160">
-              <template #default="{ row }">{{ formatDate(row.deadline) }}</template>
+              <template #default="{ row }"><div class="deadline-cell"><span>{{ formatDate(row.deadline) }}</span><el-tag v-if="row.makeup_allowed" type="warning" effect="dark" size="small">待补交</el-tag></div></template>
             </el-table-column>
             <el-table-column label="提交状态" width="120">
               <template #default="{ row }">
                 <el-tag :type="submissionStatusType(row)" effect="plain">{{ submissionStatusLabel(row) }}</el-tag>
               </template>
+            </el-table-column>
+            <el-table-column label="提交日期" min-width="190">
+              <template #default="{ row }"><span v-if="hasAllRequiredConfirmedSubmissions(row) && row.submission">{{ formatDate(row.submission.effective_submitted_at ?? row.submission.submitted_at) }} <el-tag v-if="row.submission.is_makeup" type="warning" size="small">补交</el-tag></span><span v-else>-</span></template>
             </el-table-column>
             <el-table-column label="批改状态" width="120">
               <template #default="{ row }">
@@ -2464,9 +2574,7 @@ onMounted(() => {
           </el-table>
         </section>
           <template v-if="selectedStudentAssignment">
-            <section class="workflow-card student-assignment-description" aria-label="作业说明">
-              <div class="assignment-rendered" v-html="renderContent(assignmentMarkdown(selectedStudentAssignment), 'markdown')" />
-            </section>
+              <AssignmentMaterials :assignment-id="selectedStudentAssignment.id" :files="selectedStudentAssignment.code_templates" :fallback-markdown="assignmentMarkdown(selectedStudentAssignment)" :header-markdown="assignmentMarkdown(selectedStudentAssignment, false)" />
             <section class="workflow-card assignment-submission-panel" aria-labelledby="assignment-submission-title">
               <div class="card-header">
                 <div>
@@ -2505,8 +2613,7 @@ onMounted(() => {
             </el-table>
             <div class="assignment-confirm-bar">
               <div>
-                <strong>准备完成后，确认提交整份作业</strong>
-                <span>保存或上传不代表提交；确认后进入批改和评测。</span>
+                <strong>完成后确认提交</strong>
               </div>
               <el-button type="primary" :icon="Check" :disabled="!canConfirmAssignmentSubmission(selectedStudentAssignment)" :loading="submissionLoading" @click="confirmAssignmentSubmission(selectedStudentAssignment)">
                 确认提交作业
@@ -2595,7 +2702,6 @@ onMounted(() => {
     <input ref="rosterInput" type="file" accept=".xlsx,.xlsm" hidden @change="handleFileChange" />
     <el-dialog v-model="importDialogVisible" title="确认导入学生名单" width="min(500px, 94vw)" :close-on-click-modal="!rosterLoading" :show-close="!rosterLoading">
       <p>已解析 {{ parsedStudentCount }} 名学生，导入至 {{ currentClass?.alias }}，需要追加还是覆盖？</p>
-      <p class="muted-line">追加：只新增编号，保留已有名单。覆盖：更新未注册名单并移除文件中没有的未注册学生。已绑定账号的学生始终保留；姓名或学号冲突时取消导入。</p>
       <template #footer>
         <el-button :disabled="rosterLoading" @click="importDialogVisible = false">取消</el-button>
         <el-button :loading="rosterLoading" @click="importRoster('replace')">覆盖</el-button>
@@ -2674,12 +2780,11 @@ onMounted(() => {
           <el-button type="primary" :icon="DocumentAdd" @click="currentClass && openAssignmentDialog(currentClass)">新建作业</el-button>
         </div>
       </div>
-      <el-table :data="managedAssignments" v-loading="assignmentLoading" row-key="id" empty-text="暂无作业" row-class-name="clickable-row" @row-click="openSubmissionsDrawer">
-        <el-table-column prop="title" label="作业" min-width="180" />
-        <el-table-column prop="code" label="代码" width="100" />
-        <el-table-column label="类型" width="90">
-          <template #default="{ row }">{{ assignmentTypeLabel(row.type) }}</template>
+      <el-table :data="managedAssignments" v-loading="assignmentLoading" row-key="id" empty-text="暂无作业" :row-class-name="teacherAssignmentRowClassName" @row-click="openSubmissionsDrawer">
+        <el-table-column label="作业 / 实验" min-width="240">
+          <template #default="{ row }"><div class="assignment-title"><el-tag :type="row.type === 'lab_report' ? 'success' : 'primary'" effect="dark">{{ assignmentTypeLabel(row.type) }}</el-tag><strong>{{ row.title }}</strong></div></template>
         </el-table-column>
+        <el-table-column prop="code" label="代码" width="100" />
         <el-table-column label="截止时间" min-width="160">
           <template #default="{ row }">{{ formatDate(row.deadline) }}</template>
         </el-table-column>
@@ -2723,7 +2828,7 @@ onMounted(() => {
             <el-tag :type="assignmentStatusType(previewAssignment.status)" effect="plain">{{ assignmentStatusLabel(previewAssignment.status) }}</el-tag>
           </div>
         </div>
-            <div class="assignment-rendered" v-html="renderContent(assignmentMarkdown(previewAssignment), 'markdown')" />
+            <AssignmentMaterials :assignment-id="previewAssignment.id" :files="previewAssignment.code_templates" :fallback-markdown="assignmentMarkdown(previewAssignment)" :header-markdown="assignmentMarkdown(previewAssignment, false)" />
         <h2>需提交文件</h2>
         <el-table :data="previewAssignment.submission_requirements" row-key="key" empty-text="暂无提交项">
           <el-table-column prop="label" label="提交项" min-width="140" />
@@ -2743,7 +2848,7 @@ onMounted(() => {
               <p>{{ previewAssignment.program_evaluations.length }} 个模块</p>
             </div>
           </div>
-          <el-table :data="previewAssignment.program_evaluations" row-key="name" empty-text="未添加程序评测，发布后将由教师手动批改或使用其它评测方式">
+          <el-table :data="previewAssignment.program_evaluations" row-key="name" empty-text="暂无程序评测">
             <el-table-column prop="name" label="名称" min-width="140" />
             <el-table-column label="输入文件" min-width="120">
               <template #default="{ row }">{{ requirementLabel(previewAssignment, row.input_file_key) }}</template>
@@ -2763,7 +2868,7 @@ onMounted(() => {
               <p>{{ previewAssignment.ai_evaluations.length }} 个模块</p>
             </div>
           </div>
-          <el-table :data="previewAssignment.ai_evaluations" row-key="name" empty-text="未添加 AI 评测，发布后将由教师手动批改或使用其它评测方式">
+          <el-table :data="previewAssignment.ai_evaluations" row-key="name" empty-text="暂无 AI 评测">
             <el-table-column prop="name" label="名称" min-width="140" />
             <el-table-column label="输入文件" min-width="120">
               <template #default="{ row }">{{ requirementLabel(previewAssignment, row.input_file_key) }}</template>
@@ -2789,8 +2894,7 @@ onMounted(() => {
         </div>
         <div class="toolbar-actions">
           <el-button :icon="Refresh" :loading="submissionLoading" @click="selectedAssignmentId && loadSubmissions(selectedAssignmentId)">刷新</el-button>
-          <el-button :icon="Download" @click="exportAssignmentGradesCsv">CSV</el-button>
-          <el-button type="primary" :icon="Files" @click="openScoreManagerDialog">ScoreManagerCLI</el-button>
+          <el-button type="primary" :icon="Download" @click="openScoreManagerDialog">成绩导出 / ScoreManagerCLI</el-button>
         </div>
       </div>
       <div v-if="gradeAnalysis" class="analysis-grid">
@@ -2818,7 +2922,7 @@ onMounted(() => {
         <el-table-column prop="roster.student_no" label="序号" width="80" />
         <el-table-column prop="roster.student_name" label="姓名" min-width="120" />
         <el-table-column label="提交日期" min-width="120">
-          <template #default="{ row }">{{ row.is_expired ? '已过期' : row.student_state === 'submitted' && row.submission ? formatDate(row.submission.submitted_at) : '-' }}</template>
+          <template #default="{ row }">{{ row.is_expired ? '已过期' : row.submitted_at ? formatDate(row.submitted_at) : '-' }} <el-tag v-if="row.is_makeup" type="warning" size="small">补交</el-tag></template>
         </el-table-column>
         <el-table-column label="总分" width="90" align="center">
           <template #default="{ row }">{{ row.final_score ?? '' }}</template>
@@ -2831,14 +2935,22 @@ onMounted(() => {
             </div>
           </template>
         </el-table-column>
+        <el-table-column v-if="selectedAssignment?.deadline && new Date(selectedAssignment.deadline).getTime() < Date.now()" label="补交" width="130">
+          <template #default="{ row }">
+            <el-button v-if="row.roster.matched_user_id && row.student_state !== 'submitted'" size="small" :type="row.makeup_allowed ? 'warning' : 'primary'" plain :disabled="submissionLoading" @click.stop="toggleMakeupPermission(row)">{{ row.makeup_allowed ? '取消补交' : '允许补交' }}</el-button>
+          </template>
+        </el-table-column>
       </el-table>
       </section>
     </el-drawer>
 
-        <el-dialog v-model="scoreManagerDialogVisible" title="ScoreManagerCLI 导出" width="min(760px, 94vw)" class="structured-form-dialog">
+        <el-dialog v-model="scoreManagerDialogVisible" title="成绩导出 / ScoreManagerCLI" width="min(760px, 94vw)" class="structured-form-dialog">
       <el-form label-position="top" @submit.prevent>
         <section class="workflow-card">
           <h2>导出设置</h2>
+          <el-form-item label="成绩比例因子">
+            <el-input-number v-model="scoreManagerForm.score_factor" :min="0" :max="1000" :step="0.1" controls-position="right" @change="generateScoreManagerCommands" />
+          </el-form-item>
         <div class="form-grid wide">
           <el-form-item label="目标字段">
             <el-input v-model="scoreManagerForm.field" placeholder="homework / exp1" @change="generateScoreManagerCommands" />
@@ -2850,12 +2962,14 @@ onMounted(() => {
             </el-select>
           </el-form-item>
         </div>
-        <el-checkbox v-if="scoreManagerForm.command_type === 'regular'" v-model="scoreManagerForm.group_same_score" @change="generateScoreManagerCommands">
-          同分合并为 brd
+        <el-checkbox v-model="scoreManagerForm.group_same_score" @change="generateScoreManagerCommands">
+          同分合并为 brd / lab brd
         </el-checkbox>
         </section>
         <section class="workflow-card">
           <h2>命令预览</h2>
+          <el-tag type="warning" effect="plain">重复导入会重复记分</el-tag>
+          <pre class="batch-import-command">Get-Content -LiteralPath "scoremanager_commands.txt" | python main.py "课程名"</pre>
         <el-form-item label="命令文本">
           <el-input v-model="scoreManagerCommands" type="textarea" :rows="12" readonly placeholder="暂无可导出的已复核或已发布成绩" />
         </el-form-item>
@@ -2864,7 +2978,9 @@ onMounted(() => {
       <template #footer>
         <el-button @click="scoreManagerDialogVisible = false">关闭</el-button>
         <el-button :icon="Refresh" :loading="submissionLoading" @click="generateScoreManagerCommands">刷新命令</el-button>
-        <el-button type="primary" :icon="Check" @click="copyScoreManagerCommands">复制</el-button>
+        <el-button :icon="Download" @click="exportAssignmentGradesCsv">下载 CSV</el-button>
+        <el-button :icon="Download" :disabled="submissionLoading" @click="downloadScoreManagerCommands">下载批处理 TXT</el-button>
+        <el-button type="primary" :icon="Check" :disabled="submissionLoading" @click="copyScoreManagerCommands">复制全部命令</el-button>
       </template>
     </el-dialog>
     <el-dialog v-model="gradeReviewDialogVisible" title="作业批改" width="min(1120px, 96vw)" class="grade-review-dialog">
@@ -2980,7 +3096,7 @@ onMounted(() => {
                     </template>
                   </el-table-column>
                 </el-table>
-                <p v-else class="muted-line">该文件已配置程序评测，但当前还没有用例结果。请点击“重测”，或检查 Docker/测试用例配置后刷新。</p>
+                <p v-else class="muted-line">暂无程序评测结果</p>
               </template>
               <div v-else-if="item.review_kind === 'ai'" class="ai-report-list">
                 <div v-for="module in aiModulesForReviewItem(item)" :key="`${module.input_file_key}-${module.name}`" class="ai-report-item">
@@ -2998,9 +3114,9 @@ onMounted(() => {
                   </div>
                   <div class="assignment-rendered" v-html="renderContent(module.summary ?? module.message ?? '暂无模型反馈', 'markdown')" />
                 </div>
-                <p v-if="!aiModulesForReviewItem(item).length" class="muted-line">暂无 AI 评测结果，教师可先人工复核。</p>
+                <p v-if="!aiModulesForReviewItem(item).length" class="muted-line">暂无 AI 评测结果</p>
               </div>
-              <p v-else class="muted-line">该文件未配置程序或 AI 评测，需要教师手动批改。</p>
+              <p v-else class="muted-line">待人工批改</p>
             </section>
 
             <div class="form-grid wide">
@@ -3038,14 +3154,7 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="submissionPreviewDialogVisible" :title="previewingSubmission ? `${previewingSubmission.original_filename} 在线预览` : '在线预览'" width="min(960px, 94vw)">
-      <div v-if="submissionPreview?.previewable" class="assignment-rendered" v-html="renderContent(submissionPreviewMarkdown(), 'markdown')" />
-      <el-empty v-else :description="submissionPreview?.message ?? '正在加载预览'" />
-      <template #footer>
-        <el-button @click="submissionPreviewDialogVisible = false">关闭</el-button>
-        <el-button v-if="previewingSubmission" :icon="Download" @click="openSubmissionDownload(previewingSubmission)">下载文件</el-button>
-      </template>
-    </el-dialog>
+    <FilePreviewDialog v-model="submissionPreviewDialogVisible" :filename="previewingSubmission?.original_filename ?? ''" :content="submissionPreview?.content" :loading="!submissionPreview && !submissionPreviewError" :error="submissionPreviewError" :previewable="submissionPreview?.previewable ?? false" :message="submissionPreview?.message" @retry="previewingSubmission && openSubmissionPreview(previewingSubmission)" @download="previewingSubmission && openSubmissionDownload(previewingSubmission)" />
 
     <el-dialog v-model="feedbackPreviewDialogVisible" title="反馈报告预览" width="min(960px, 94vw)">
       <div class="assignment-rendered" v-html="renderContent(generatedFeedbackReport(), 'markdown')" />
@@ -3281,13 +3390,40 @@ onMounted(() => {
         </section>
         <section class="workflow-card assignment-description-card" aria-labelledby="assignment-description-title">
           <div class="card-header">
-            <h2 id="assignment-description-title">作业说明</h2>
+            <h2 id="assignment-description-title">主说明</h2>
             <el-tag effect="plain">Markdown</el-tag>
           </div>
           <MarkdownEditor v-if="teacherMarkdownDocument" :key="teacherMarkdownDocument.id" ref="teacherMarkdownEditor" library-role="teacher"
             v-model="assignmentForm.description" :document-id="teacherMarkdownDocument.id" :initial-revision="teacherMarkdownDocument.revision"
             :preview-source="assignmentFormMarkdown()" :filename="`${assignmentForm.code || 'assignment'}.md`" />
           <el-alert v-else title="正在加载 Markdown 编辑器…" type="info" :closable="false" />
+        </section>
+        <section class="workflow-card" aria-labelledby="assignment-code-templates-title" v-loading="codeTemplatesLoading">
+          <div class="card-header">
+            <h2 id="assignment-code-templates-title">作业资料 <el-tag effect="plain">{{ codeTemplates.length }}/4</el-tag></h2>
+            <div class="toolbar-actions">
+              <el-button :icon="DocumentAdd" :disabled="codeTemplatesLoading || !codeTemplatesReady || codeTemplates.length >= 4" @click="newMaterial">新建</el-button>
+              <el-button :icon="Upload" :disabled="codeTemplatesLoading || !codeTemplatesReady" @click="codeTemplateInput?.click()">上传</el-button>
+            </div>
+          </div>
+          <input ref="codeTemplateInput" type="file" accept=".py,.md" multiple hidden @change="uploadCodeTemplates" />
+          <el-table :data="codeTemplates" row-key="id" empty-text="尚未上传作业资料">
+            <el-table-column label="文件名" min-width="180"><template #default="{ row }">
+              <el-input v-model="row.filename" aria-label="附件文件名" maxlength="120" :disabled="codeTemplatesLoading" />
+            </template></el-table-column>
+            <el-table-column label="用途" min-width="150"><template #default="{ row }">
+              <el-input v-model="row.purpose" aria-label="附件用途" placeholder="选填" maxlength="120" :disabled="codeTemplatesLoading" />
+            </template></el-table-column>
+            <el-table-column label="大小" width="120"><template #default="{ row }">{{ (row.file_size / 1024).toFixed(1) }} KB</template></el-table-column>
+            <el-table-column label="操作" width="190"><template #default="{ row, $index }">
+              <div class="row-actions attachment-actions">
+              <el-button :icon="View" circle title="预览附件" aria-label="预览附件" :disabled="codeTemplatesLoading" @click="teacherMaterialPreview?.selectFile(row)" />
+              <el-button v-if="row.filename.toLowerCase().endsWith('.md')" :icon="Edit" circle title="编辑附件" :disabled="codeTemplatesLoading" @click="openMaterialEditor(row)" />
+              <el-button :icon="Download" circle title="下载" :disabled="codeTemplatesLoading" @click="teacherMaterialPreview?.downloadSelected(row)" />
+              <el-button :icon="Delete" type="danger" circle title="移除" :disabled="codeTemplatesLoading" @click="removeCodeTemplate($index)" />
+              </div>
+            </template></el-table-column>
+          </el-table>
         </section>
         <section class="workflow-card" aria-labelledby="assignment-files-title">
           <div class="card-header">
@@ -3389,7 +3525,6 @@ onMounted(() => {
     </el-dialog>
 
     <el-dialog v-model="markdownDialogVisible" :title="`在线编辑 ${submittingRequirement?.label ?? 'Markdown 作业'}`" fullscreen class="assignment-editor-dialog student-markdown-dialog" :before-close="closeStudentMarkdownEditor" destroy-on-close>
-      <el-alert title="草稿会自动保存。完成编辑后，请回到作业页面点击“确认提交作业”。" type="info" :closable="false" show-icon />
       <MarkdownEditor v-if="studentMarkdownDocument" :key="studentMarkdownDocument.id" ref="studentMarkdownEditor" library-role="student"
         v-model="studentMarkdownContent" :document-id="studentMarkdownDocument.id" :initial-revision="studentMarkdownDocument.revision"
         :filename="(expectedSubmissionName || 'report.md').replace('{extension}', '.md')" />
@@ -3410,7 +3545,7 @@ onMounted(() => {
           <strong>{{ submittingRequirement.max_size_mb }} MB</strong>
         </div>
       </div>
-      <el-alert v-if="submittingRequirement?.allowed_extensions.includes('.md')" title="若 Markdown 中有图片，需要在在线编辑器中上传图片；本地图片不会随 .md 文件上传。" type="warning" :closable="false" show-icon />
+      <el-alert v-if="submittingRequirement?.allowed_extensions.includes('.md')" title="配图请在在线编辑器中上传。" type="warning" :closable="false" show-icon />
       <input ref="submissionFileInput" type="file" :accept="submittingRequirement?.allowed_extensions.join(',')" hidden @change="handleSubmissionFileChange" />
       <el-button class="submission-select-button" type="primary" plain :icon="Files" @click="submissionFileInput?.click()">选择文件</el-button>
       <div class="selected-file-label" role="status">{{ selectedSubmissionFile?.name || '尚未选择文件' }}</div>
@@ -3426,7 +3561,7 @@ onMounted(() => {
       <ImageLibrary v-if="imageLibraryVisible && (isTeacher || currentUser?.role === 'student')" :role="isTeacher ? 'teacher' : 'student'" />
     </el-dialog>
     <el-dialog v-model="copyDialogVisible" title="迁移作业设置" width="min(500px, 94vw)" :close-on-click-modal="!copyLoading" :show-close="!copyLoading">
-      <p>复制“{{ copyingAssignment?.title }}”的说明、配图、提交规则与评测设置。目标作业保存为草稿，学生提交及成绩不迁移。请检查截止时间与固定写入的班级编号后发布。</p>
+      <p>复制“{{ copyingAssignment?.title }}”为目标班级的草稿。</p>
       <el-form id="assignment-copy-form" label-position="top" @submit.prevent="copyAssignmentSettings">
         <el-form-item label="目标教学班">
           <el-select v-model="copyClassId" placeholder="选择自己的另一个教学班">
@@ -3469,5 +3604,7 @@ onMounted(() => {
         </el-button>
       </template>
     </el-dialog>
+    <AssignmentMaterials v-if="assignmentDialogVisible" ref="teacherMaterialPreview" :files="codeTemplates" preview-only fallback-markdown="" />
+    <MaterialEditor v-if="editingMaterial" :key="editingMaterial.id" v-model="materialEditorVisible" :file="editingMaterial" :existing-names="codeTemplates.filter(file => file.id !== editingMaterial?.id).map(file => file.filename)" @apply="applyMaterialEdit" />
   </main>
 </template>

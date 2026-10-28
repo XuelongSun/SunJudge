@@ -18,7 +18,7 @@ function loadTypeScript(name) {
   module._compile(compiled, filename)
   return module.exports
 }
-const { renderContent } = loadTypeScript('markdown')
+const { renderContent, renderFilePreview } = loadTypeScript('markdown')
 const { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput } = loadTypeScript('reportTemplates')
 const { aiResultRows } = loadTypeScript('gradingPresentation')
 const { progressPercent, filenamePreview, insertAtSelection, completionSegments } = loadTypeScript('presentation')
@@ -137,4 +137,15 @@ test('publication footers use days while deadline and submission timestamps reta
   const feedback = feedbackMarkdown({ name: '学生', studentNumber: '001', code: 'hw1', submittedAt: '2026-10-09 08:30:00', deadline: '-', score: 80, course: '课程', teacher: '教师', publishedAt: '2026-10-09 12:34:56', comment: '', files: [] })
   assert.match(feedback, /2026-10-09 08:30:00/)
   assert.match(feedback, /课程 - 教师 - 2026-10-09\*/)
+})
+
+
+test('shared file preview renders Markdown and fences code safely including BOM and embedded backticks', () => {
+  assert.match(renderFilePreview('\ufeff# 附件', 'NOTES.MD'), /<h1>附件<\/h1>/)
+  const code = '```\n<script>alert(1)</script>\n# code heading\nprint(1)'
+  const html = renderFilePreview(code, 'starter.py')
+  assert.match(html, /class="hljs"/)
+  assert.doesNotMatch(html, /<script>|<h1>/)
+  assert.match(html, /code heading/)
+  assert.doesNotMatch(renderFilePreview('<img src=x>', 'unknown.txt'), /<img/)
 })

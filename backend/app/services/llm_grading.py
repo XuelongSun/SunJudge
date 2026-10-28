@@ -154,7 +154,7 @@ def _build_prompt(
     criteria_items: list[object],
 ) -> str:
     context = {
-        "assignment": {"title": assignment.title, "code": assignment.code, "description": assignment.description or ""},
+        "assignment": {"title": assignment.title, "code": assignment.code, "description": getattr(assignment, "effective_description", assignment.description or "")},
         "student": student.student_name if student else "Unknown", "filename": submission_filename,
         "teacher_instruction": module.get("input") or "", "module_max_score": round(max_score, 2),
         "rubric": criteria_items, "student_content": content[:20000], "content_truncated": len(content) > 20000,

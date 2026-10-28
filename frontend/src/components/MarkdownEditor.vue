@@ -9,8 +9,10 @@ import type { LibraryImage } from '../api'
 
 const props = defineProps<{
   modelValue: string
-  documentId: number
-  initialRevision: number
+  documentId?: number
+  initialRevision?: number
+  persistence?: 'document' | 'form'
+  contextLabel?: string
   filename?: string
   previewSource?: string
   libraryRole?: 'teacher' | 'student'
@@ -37,20 +39,23 @@ const uploading = ref(0)
 const saveError = ref('')
 const dirty = computed(() => props.modelValue !== savedContent.value)
 const savedContent = ref(props.modelValue)
-let revision = props.initialRevision
+let revision = props.initialRevision ?? 0
 let conflicted = false
 let timer: ReturnType<typeof setTimeout> | undefined
 let saveQueue = Promise.resolve()
 let uploadQueue = Promise.resolve()
-const status = computed(() => saveError.value || (uploading.value ? '图片上传中…' : saving.value ? '正在保存…' : dirty.value ? '等待保存…' : '草稿已保存'))
+const localForm = computed(() => props.persistence === 'form')
+const status = computed(() => saveError.value || (uploading.value ? '图片上传中…' : saving.value ? '正在保存…' : localForm.value ? (dirty.value ? '待应用到作业' : '随作业保存') : dirty.value ? '等待保存…' : '草稿已保存'))
 
 function persist() {
+  if (localForm.value) return Promise.resolve()
   const task = saveQueue.catch(() => {}).then(async () => {
     if (conflicted) throw new Error(saveError.value)
     if (props.modelValue === savedContent.value) { saveError.value = ''; return }
     const content = props.modelValue
     saving.value = true
     try {
+      if (!props.documentId) throw new Error('草稿尚未加载')
       const result = await api.saveMarkdownDocument(props.documentId, content, revision)
       revision = result.document.revision
       savedContent.value = content
@@ -70,6 +75,7 @@ function persist() {
 
 watch(() => props.modelValue, () => {
   clearTimeout(timer)
+  if (localForm.value) return
   timer = setTimeout(() => { void persist().catch(() => {}) }, 900)
 })
 
@@ -79,6 +85,10 @@ async function flush() {
   for (;;) {
     const pendingUploads = uploadQueue
     await pendingUploads
+    if (localForm.value) {
+      if (pendingUploads === uploadQueue) return
+      continue
+    }
     await persist()
     if (pendingUploads === uploadQueue && props.modelValue === savedContent.value) return
   }
@@ -101,7 +111,9 @@ function addImages(files: File[]) {
     uploading.value++
     uploadQueue = uploadQueue.then(async () => {
       try {
-        const result = await api.uploadMarkdownImage(props.documentId, file)
+        const result = localForm.value && props.libraryRole
+          ? await api.uploadLibraryImage(props.libraryRole, file)
+          : await api.uploadMarkdownImage(props.documentId!, file)
         const editor = textarea.value
         const start = editor?.selectionStart ?? props.modelValue.length
         const end = editor?.selectionEnd ?? start
@@ -146,7 +158,7 @@ async function importMarkdown(event: Event) {
   try {
     const content = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
     emit('update:modelValue', content.replace(/^\uFEFF/, ''))
-    ElMessage.info('正文已导入，本地配图请通过“插入图片”重新上传。')
+    ElMessage.info('已导入正文')
   } catch { ElMessage.error('无法读取文件，请使用 UTF-8 编码的 Markdown 文件。') }
 }
 function downloadMarkdown() {
@@ -158,7 +170,7 @@ function downloadMarkdown() {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 async function saveNow() {
-  try { await flush() } catch (error) { ElMessage.error((error as Error).message) }
+  try { await flush(); if (localForm.value) emit('saved') } catch (error) { ElMessage.error((error as Error).message) }
 }
 </script>
 
@@ -170,11 +182,10 @@ async function saveNow() {
         <el-button v-if="libraryRole" @click="libraryVisible = true">从图片库选择</el-button>
         <el-button @click="markdownInput?.click()">导入 .md</el-button>
         <el-button @click="downloadMarkdown">下载 .md</el-button>
-        <el-button :loading="saving" @click="saveNow">保存草稿</el-button>
+        <el-button v-if="!localForm" :loading="saving" @click="saveNow">保存草稿</el-button>
       </div>
       <span :class="{ 'markdown-save-error': saveError }" role="status" aria-live="polite">{{ status }}</span>
     </div>
-    <p class="muted-line">支持粘贴截图、拖拽图片（PNG/JPEG，单张 ≤ 5 MB）。草稿自动保存，保存不代表提交或发布。</p>
     <input ref="imageInput" type="file" accept="image/png,image/jpeg" multiple hidden @change="selectImages" />
     <input ref="markdownInput" type="file" accept=".md" hidden @change="importMarkdown" />
     <el-dialog v-model="libraryVisible" title="我的图片库" width="min(900px, 94vw)" append-to-body destroy-on-close>
@@ -182,9 +193,9 @@ async function saveNow() {
     </el-dialog>
     <div class="markdown-edit-grid">
       <label class="markdown-source-panel">
-        <textarea ref="textarea" :value="modelValue" spellcheck="false" aria-label="Markdown 正文" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)" @paste="pasteImages" @keydown.ctrl.s.prevent="saveNow" @keydown.meta.s.prevent="saveNow" />
+        <textarea ref="textarea" :value="modelValue" spellcheck="false" :aria-label="contextLabel ? `${contextLabel} 正文` : 'Markdown 正文'" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)" @paste="pasteImages" @keydown.ctrl.s.prevent="saveNow" @keydown.meta.s.prevent="saveNow" />
       </label>
-      <section class="markdown-live-preview" aria-label="Markdown 预览">
+      <section class="markdown-live-preview" :aria-label="contextLabel ? `${contextLabel} 预览` : 'Markdown 预览'">
         <div class="assignment-rendered" v-html="renderContent(previewSource ?? modelValue, 'markdown')" />
       </section>
     </div>

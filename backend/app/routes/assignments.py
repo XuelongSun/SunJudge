@@ -8,6 +8,7 @@ import math
 import shlex
 from uuid import uuid4
 from copy import deepcopy
+from io import BytesIO
 
 from flask import Blueprint, Response, current_app, jsonify, request, send_file
 from flask_login import current_user, login_required
@@ -18,6 +19,7 @@ from ..models import (
     Assignment,
     AssignmentGrade,
     AssignmentRead,
+    AssignmentStudentOverride,
     AuditLog,
     ClassRoster,
     Course,
@@ -44,9 +46,10 @@ from ..services.feedback_report import build_feedback_report
 from ..services.markdown_documents import bind_description_document, prepare_student_drafts, validate_document_images
 from ..services.grading_queue import enqueue_auto_grading
 from ..services.secrets import encrypt_api_key
-from ..services.score_export import build_assignment_grade_csv, build_assignment_gradebook, build_scoremanager_export
+from ..services.score_export import build_assignment_grade_csv, build_assignment_gradebook, build_scoremanager_export, parse_score_factor
 from ..services.assignment_weights import validate_weights, validate_review_weights
-from ..services.student_assignment_state import student_deadline_state
+from ..services.student_assignment_state import student_deadline_state, makeup_allowed, student_override
+from ..services.code_templates import MAX_TEMPLATE_BYTES, normalize_code_template, normalize_code_templates
 from .permissions import roles_required
 
 
@@ -180,7 +183,7 @@ def copy_assignment(assignment_id: int):
         return jsonify(message="目标班级已有相同代码，请修改迁移后的作业代码。"), 409
     fields = ("title", "type", "description", "description_format", "deadline", "allow_late", "late_policy",
               "max_score", "file_rules_json", "submission_requirements_json", "rubric_json", "rubric_format",
-              "program_evaluations_json", "ai_evaluations_json")
+              "program_evaluations_json", "ai_evaluations_json", "code_templates_json")
     assignment = Assignment(course_id=target.course_id, class_id=target.id, code=code,
                             status=Assignment.STATUS_DRAFT, **{key: deepcopy(getattr(source, key)) for key in fields})
     db.session.add(assignment)
@@ -199,6 +202,62 @@ def copy_assignment(assignment_id: int):
     return jsonify(assignment=assignment.to_dict(include_counts=True)), 201
 
 
+@assignments_bp.post("/teacher/code-templates/validate")
+@login_required
+@roles_required(User.ROLE_TEACHER)
+def validate_code_template_upload():
+    if current_user.teacher_status != User.TEACHER_STATUS_APPROVED:
+        return jsonify(message="教师账号尚未审批。"), 403
+    uploaded = request.files.get("file")
+    if not uploaded:
+        return jsonify(message="请选择 .py / .md 文件。"), 400
+    raw = uploaded.stream.read(MAX_TEMPLATE_BYTES + 1)
+    if len(raw) > MAX_TEMPLATE_BYTES:
+        return jsonify(message="单个作业资料文件不能超过 1 MB。"), 400
+    try:
+        template = normalize_code_template(uploaded.filename, raw.decode("utf-8"))
+    except UnicodeError:
+        return jsonify(message="作业资料须使用 UTF-8 编码。"), 400
+    except FileValidationError as exc:
+        return jsonify(message=str(exc)), 400
+    # Validation only: closing an unsaved editor leaves no uploaded file behind.
+    return jsonify({"template": template})
+
+
+@assignments_bp.get("/admin/assignments/<int:assignment_id>/code-templates")
+@login_required
+@roles_required(User.ROLE_TEACHER)
+def edit_assignment_code_templates(assignment_id: int):
+    if current_user.teacher_status != User.TEACHER_STATUS_APPROVED:
+        return jsonify(message="教师账号尚未审批。"), 403
+    assignment = _get_managed_assignment_or_404(assignment_id)
+    if not assignment:
+        return jsonify(message="Assignment not found or not manageable."), 404
+    return jsonify({"templates": assignment.code_templates_json or []})
+
+
+@assignments_bp.get("/assignments/<int:assignment_id>/code-templates/<string:template_id>/download")
+@assignments_bp.get("/assignments/<int:assignment_id>/code-templates/<string:template_id>/preview")
+@login_required
+@roles_required(User.ROLE_TEACHER, User.ROLE_STUDENT)
+def download_assignment_code_template(assignment_id: int, template_id: str):
+    if current_user.role == User.ROLE_TEACHER and current_user.teacher_status != User.TEACHER_STATUS_APPROVED:
+        return jsonify(message="教师账号尚未审批。"), 403
+    assignment = (_get_student_assignment_or_404(assignment_id) if current_user.role == User.ROLE_STUDENT
+                  else _get_managed_assignment_or_404(assignment_id))
+    template = next((item for item in assignment.code_templates_json or [] if item["id"] == template_id), None) if assignment else None
+    if not template:
+        return jsonify(message="Code template not found or not accessible."), 404
+    if request.path.endswith('/preview'):
+        response = jsonify({"template": {**template, "purpose": template.get("purpose", "")}})
+    else:
+        response = send_file(BytesIO(template["content"].encode("utf-8")), download_name=template["filename"],
+                             as_attachment=True, mimetype="text/markdown" if template["filename"].lower().endswith('.md') else "text/x-python", max_age=0)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 @assignments_bp.patch("/admin/assignments/<int:assignment_id>")
 @login_required
 @roles_required(User.ROLE_TEACHER)
@@ -210,8 +269,11 @@ def update_assignment(assignment_id: int):
     old_status = assignment.status
     old_code = assignment.code
     was_published = old_status == Assignment.STATUS_PUBLISHED
+    resubmit = payload.get("require_resubmission")
+    if "require_resubmission" in payload and type(resubmit) is not bool:
+        return jsonify(message="require_resubmission must be a boolean."), 400
     reset_grading = bool(payload.get("reset_grading") or payload.get("reset_grades"))
-    needs_reset_confirmation = was_published and _assignment_has_grading_artifacts(assignment) and not reset_grading
+    needs_reset_confirmation = was_published and _assignment_has_grading_artifacts(assignment) and not reset_grading and resubmit is None
     if needs_reset_confirmation:
         return (
             jsonify(
@@ -223,6 +285,8 @@ def update_assignment(assignment_id: int):
             HTTPStatus.CONFLICT,
         )
 
+    if assignment.published_at and resubmit is False:
+        _preserve_assignment_submissions(assignment)
     assignment, error = _apply_assignment_payload(assignment, payload, partial=True)
     if error:
         return jsonify({"message": error}), HTTPStatus.BAD_REQUEST
@@ -239,12 +303,14 @@ def update_assignment(assignment_id: int):
         ).first()
         if duplicate:
             return jsonify({"message": "Assignment code already exists in this teaching class."}), HTTPStatus.CONFLICT
-    if old_status != Assignment.STATUS_PUBLISHED and assignment.status == Assignment.STATUS_PUBLISHED:
+    if old_status != Assignment.STATUS_PUBLISHED and assignment.status == Assignment.STATUS_PUBLISHED and not assignment.published_at:
         assignment.published_at = utc_now()
 
     cleanup = None
     rerun_count = 0
-    if was_published and reset_grading:
+    if assignment.published_at and resubmit is True:
+        cleanup = _require_assignment_resubmission(assignment)
+    elif was_published and reset_grading and resubmit is None:
         cleanup = _clear_assignment_student_work(assignment, delete_submissions=False, delete_files=False)
         db.session.flush()
         rerun_count = _enqueue_auto_grading_for_assignment(assignment, reason="assignment_reset")
@@ -255,7 +321,7 @@ def update_assignment(assignment_id: int):
             action="assignment_updated",
             target_type="assignment",
             target_id=assignment.id,
-            payload_json={"old_status": old_status, "new_status": assignment.status, "reset_grading": reset_grading, "cleanup": cleanup, "rerun_count": rerun_count},
+            payload_json={"old_status": old_status, "new_status": assignment.status, "require_resubmission": resubmit, "reset_grading": reset_grading, "cleanup": cleanup, "rerun_count": rerun_count},
         )
     )
     db.session.commit()
@@ -269,6 +335,15 @@ def publish_assignment(assignment_id: int):
     assignment = _get_managed_assignment_or_404(assignment_id)
     if not assignment:
         return jsonify({"message": "Assignment not found or not manageable."}), HTTPStatus.NOT_FOUND
+    payload = request.get_json(silent=True) or {}
+    resubmit = payload.get("require_resubmission", False)
+    if type(resubmit) is not bool:
+        return jsonify(message="require_resubmission must be a boolean."), 400
+    if assignment.published_at:
+        if resubmit:
+            _require_assignment_resubmission(assignment)
+        else:
+            _preserve_assignment_submissions(assignment)
     assignment.status = Assignment.STATUS_PUBLISHED
     assignment.published_at = assignment.published_at or utc_now()
     db.session.add(
@@ -277,7 +352,7 @@ def publish_assignment(assignment_id: int):
             action="assignment_published",
             target_type="assignment",
             target_id=assignment.id,
-            payload_json={"class_id": assignment.class_id},
+            payload_json={"class_id": assignment.class_id, "require_resubmission": resubmit},
         )
     )
     db.session.commit()
@@ -294,6 +369,7 @@ def delete_assignment(assignment_id: int):
     class_id = assignment.class_id
     cleanup = _clear_assignment_student_work(assignment, delete_submissions=True, delete_files=True)
     AssignmentRead.query.filter_by(assignment_id=assignment.id).delete(synchronize_session=False)
+    AssignmentStudentOverride.query.filter_by(assignment_id=assignment.id).delete(synchronize_session=False)
     db.session.add(
         AuditLog(
             actor_id=current_user.id,
@@ -346,6 +422,11 @@ def list_assignment_submissions(assignment_id: int):
             student_state = "read" if read else "unread"
         teacher_state = _teacher_grading_state(assignment_grade, latest_submissions, assignment)
         deadline_state = student_deadline_state(assignment, entry.matched_user_id, assignment_grade, requirements)
+        if deadline_state["submission_complete"]:
+            student_state = "submitted"
+        confirmed = [s for s in latest_submissions if s.status in {Submission.STATUS_SUBMITTED, Submission.STATUS_LATE}
+                     and (deadline_state["submission_preserved"] or not required_keys or s.submission_item_key in required_keys)]
+        displayed_time = max((s.effective_submitted_at or s.submitted_at for s in confirmed), default=None)
         (test_rows if entry.is_test_student else rows).append(
             {
                 "roster": entry.to_dict(),
@@ -357,12 +438,47 @@ def list_assignment_submissions(assignment_id: int):
                 "student_state": student_state,
                 "teacher_state": teacher_state,
                 "is_expired": deadline_state["is_expired"],
+                "makeup_allowed": deadline_state["makeup_allowed"],
+                "submitted_at": displayed_time.isoformat() if student_state == "submitted" and displayed_time else None,
+                "is_makeup": student_state == "submitted" and any(s.is_makeup for s in confirmed),
                 "read_at": read.read_at.isoformat() if read else None,
             }
         )
     gradebook = build_assignment_gradebook(assignment)
     return jsonify({"assignment": assignment.to_dict(include_counts=True), "analysis": gradebook["summary"], "submissions": rows, "test_submissions": test_rows})
 
+
+
+@assignments_bp.patch("/admin/assignments/<int:assignment_id>/students/<int:roster_id>/makeup")
+@login_required
+@roles_required(User.ROLE_TEACHER)
+def set_makeup_permission(assignment_id: int, roster_id: int):
+    assignment = _get_managed_assignment_or_404(assignment_id)
+    if not assignment:
+        return jsonify(message="Assignment not found or not manageable."), 404
+    entry = ClassRoster.query.filter_by(id=roster_id, class_id=assignment.class_id).first()
+    if not entry or not entry.matched_user_id or not CourseMember.query.filter_by(class_id=assignment.class_id, user_id=entry.matched_user_id, role=User.ROLE_STUDENT).first():
+        return jsonify(message="学生未注册或不属于当前教学班。"), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or type(payload.get("allowed")) is not bool:
+        return jsonify(message="allowed must be a boolean."), 400
+    allowed = payload["allowed"]
+    if assignment.status != Assignment.STATUS_PUBLISHED or not assignment.deadline or utc_now() <= _as_utc(assignment.deadline):
+        return jsonify(message="只可为已截止的已发布作业设置补交。"), 400
+    grade = AssignmentGrade.query.filter_by(assignment_id=assignment.id, student_user_id=entry.matched_user_id).first()
+    if allowed and student_deadline_state(assignment, entry.matched_user_id, grade, assignment.submission_requirements_json)["submission_complete"]:
+        return jsonify(message="学生已完成提交；如需修改，请先退回重交。"), 409
+    if allowed and grade and grade.status == GradingResult.STATUS_PUBLISHED:
+        return jsonify(message="反馈已发布，请先退回重交。"), 409
+    override = student_override(assignment.id, entry.matched_user_id)
+    if not override:
+        override = AssignmentStudentOverride(assignment_id=assignment.id, student_user_id=entry.matched_user_id)
+        db.session.add(override)
+    override.makeup_allowed = allowed
+    db.session.add(AuditLog(actor_id=current_user.id, action="assignment_makeup_permission", target_type="assignment", target_id=assignment.id,
+                            payload_json={"student_user_id": entry.matched_user_id, "roster_id": entry.id, "allowed": allowed}))
+    db.session.commit()
+    return jsonify(makeup_allowed=allowed)
 
 
 @assignments_bp.get("/admin/assignments/<int:assignment_id>/grades")
@@ -390,7 +506,10 @@ def export_assignment_grades_csv(assignment_id: int):
     assignment = _get_managed_assignment_or_404(assignment_id)
     if not assignment:
         return jsonify({"message": "Assignment not found or not manageable."}), HTTPStatus.NOT_FOUND
-    csv_text = build_assignment_grade_csv(assignment)
+    try:
+        csv_text = build_assignment_grade_csv(assignment, request.args.get("score_factor", "1"))
+    except ValueError as exc:
+        return jsonify(message=str(exc)), 400
     filename = f"{assignment.course_class.alias}_{assignment.code}_grades.csv"
     return Response(
         csv_text,
@@ -411,11 +530,16 @@ def export_assignment_scoremanager_commands(assignment_id: int):
     default_command_type = "lab" if assignment.type == Assignment.TYPE_LAB_REPORT else "regular"
     command_type = str(request.args.get("command_type") or request.args.get("type") or default_command_type).strip()
     group_same_score = _truthy_arg(request.args.get("group_same_score"), default=True)
+    try:
+        factor = parse_score_factor(request.args.get("score_factor", "1"))
+    except ValueError as exc:
+        return jsonify(message=str(exc)), 400
     export, invalid_students = build_scoremanager_export(
         assignment,
         field=field,
         command_type=command_type,
         group_same_score=group_same_score,
+        score_factor=factor,
     )
     if invalid_students:
         message = (
@@ -683,7 +807,7 @@ def submit_assignment(assignment_id: int):
         return jsonify({"message": "Assignment not found, not published, or not accessible."}), HTTPStatus.NOT_FOUND
 
     now = utc_now()
-    if assignment.deadline and now > _as_utc(assignment.deadline) and not assignment.allow_late:
+    if assignment.deadline and now > _as_utc(assignment.deadline) and not assignment.allow_late and not makeup_allowed(assignment.id, current_user.id):
         return jsonify({"message": "Assignment deadline has passed and late submissions are not allowed."}), HTTPStatus.FORBIDDEN
 
     published_grade = AssignmentGrade.query.filter_by(
@@ -776,7 +900,7 @@ def confirm_assignment_submission(assignment_id: int):
         return jsonify({"message": "Assignment not found, not published, or not accessible."}), HTTPStatus.NOT_FOUND
 
     now = utc_now()
-    if assignment.deadline and now > _as_utc(assignment.deadline) and not assignment.allow_late:
+    if assignment.deadline and now > _as_utc(assignment.deadline) and not assignment.allow_late and not makeup_allowed(assignment.id, current_user.id):
         return jsonify({"message": "Assignment deadline has passed and late submissions are not allowed."}), HTTPStatus.FORBIDDEN
 
     published_grade = AssignmentGrade.query.filter_by(
@@ -804,7 +928,7 @@ def confirm_assignment_submission(assignment_id: int):
     created_paths = []
     try:
         prepare_student_drafts(assignment, current_user, requirements_by_key, created_paths)
-        latest_submissions = assignment.latest_submissions_for(current_user.id)
+        latest_submissions = [s for s in assignment.latest_submissions_for(current_user.id) if s.submission_item_key in requirements_by_key]
         student_no = roster_entry.student_no or short_student_no(roster_entry.student_id)
         validation_context = FileValidationContext(
             student_id=roster_entry.student_id,
@@ -848,9 +972,17 @@ def confirm_assignment_submission(assignment_id: int):
 
     cleanup = _clear_assignment_student_work(assignment, student_user_id=current_user.id, delete_submissions=False, delete_files=False)
     confirmed_status = Submission.STATUS_LATE if assignment.deadline and now > _as_utc(assignment.deadline) else Submission.STATUS_SUBMITTED
+    is_makeup = bool(assignment.deadline and now > _as_utc(assignment.deadline) and makeup_allowed(assignment.id, current_user.id))
+    override = student_override(assignment.id, current_user.id)
+    if override:
+        override.preserved_submission_at = None
+        if is_makeup:
+            override.makeup_allowed = False
     for submission in latest_submissions:
         submission.status = confirmed_status
         submission.submitted_at = now
+        submission.is_makeup = is_makeup
+        submission.effective_submitted_at = assignment.deadline if is_makeup else None
         db.session.add(submission)
     db.session.add(
         AuditLog(
@@ -901,6 +1033,35 @@ def _assignment_has_grading_artifacts(assignment: Assignment) -> bool:
     return False
 
 
+
+def _preserve_assignment_submissions(assignment):
+    # Snapshot completion before applying new requirements. Existing files and grades remain intact.
+    for entry in ClassRoster.query.filter_by(class_id=assignment.class_id).all():
+        if not entry.matched_user_id:
+            continue
+        grade = AssignmentGrade.query.filter_by(assignment_id=assignment.id, student_user_id=entry.matched_user_id).first()
+        if student_deadline_state(assignment, entry.matched_user_id, grade, assignment.submission_requirements_json or [])['submission_complete']:
+            override = student_override(assignment.id, entry.matched_user_id)
+            if not override:
+                override = AssignmentStudentOverride(assignment_id=assignment.id, student_user_id=entry.matched_user_id)
+                db.session.add(override)
+            confirmed = [s for s in assignment.latest_submissions_for(entry.matched_user_id) if s.status in {Submission.STATUS_SUBMITTED, Submission.STATUS_LATE}]
+            if confirmed:
+                override.preserved_submission_at = max(s.submitted_at for s in confirmed)
+
+
+def _require_assignment_resubmission(assignment):
+    cleanup = _clear_assignment_student_work(assignment, delete_submissions=False, delete_files=False)
+    for submission in Submission.query.filter_by(assignment_id=assignment.id).all():
+        submission.status = Submission.STATUS_UPLOADED
+        submission.is_makeup = False
+        submission.effective_submitted_at = None
+    for override in AssignmentStudentOverride.query.filter_by(assignment_id=assignment.id).all():
+        override.preserved_submission_at = None
+    for document in MarkdownDocument.query.filter_by(assignment_id=assignment.id, kind="submission").all():
+        document.submitted_revision = -1
+    return cleanup
+
 def _clear_assignment_student_work(
     assignment: Assignment,
     student_user_id: int | None = None,
@@ -933,6 +1094,11 @@ def _clear_assignment_student_work(
         db.session.delete(grade)
 
     if delete_submissions:
+        overrides = AssignmentStudentOverride.query.filter_by(assignment_id=assignment.id)
+        if student_user_id is not None:
+            overrides = overrides.filter_by(student_user_id=student_user_id)
+        for override in overrides.all():
+            override.preserved_submission_at = None
         document_query = MarkdownDocument.query.filter_by(assignment_id=assignment.id, kind="submission")
         if student_user_id is not None:
             document_query = document_query.filter_by(owner_id=student_user_id)
@@ -1171,6 +1337,16 @@ def _apply_assignment_payload(assignment: Assignment, payload: dict[str, object]
         assignment.ai_evaluations_json = ai_evaluations
     except ValueError as exc:
         return assignment, str(exc)
+    if "code_templates" in payload or not partial:
+        try:
+            templates = normalize_code_templates(payload.get("code_templates", []))
+            document = MarkdownDocument(owner_id=current_user.id, class_id=assignment.class_id, kind="description")
+            for item in templates:
+                if item["filename"].lower().endswith('.md'):
+                    validate_document_images(document, item["content"])
+            assignment.code_templates_json = templates
+        except FileValidationError as exc:
+            return assignment, str(exc)
     assignment.status = status
     return assignment, None
 

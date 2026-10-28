@@ -30,7 +30,7 @@ def build_feedback_report(submission: Submission, file_reviews: list[dict], teac
     info = [
         roster.student_name if roster else submission.student.student_name,
         roster.student_number if roster else "-", assignment.code,
-        report_date(submission.submitted_at), report_date(assignment.deadline), final_score,
+        report_date(submission.effective_submitted_at or submission.submitted_at) + (" (补交)" if submission.is_makeup else ""), report_date(assignment.deadline), final_score,
     ]
     lines = [
         "|姓名|学号|作业代码|提交时间|截止时间|得分|",

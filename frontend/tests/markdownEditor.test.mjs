@@ -17,12 +17,12 @@ const renderer = createRenderer({
   parentNode: () => null, nextSibling: () => null
 })
 
-function mountEditor(api) {
+function mountEditor(api, overrides = {}) {
   const filename = fileURLToPath(new URL('../src/components/MarkdownEditor.vue', import.meta.url))
   const { descriptor } = parse(readFileSync(filename, 'utf8'))
   const script = compileScript(descriptor, { id: 'markdown-editor-test' })
   const code = ts.transpileModule(script.content, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText
-  const errors = []
+  const errors = [], saved = []
   const mod = new Module(filename)
   mod.paths = Module._nodeModulePaths(path.dirname(filename))
   const originalRequire = mod.require.bind(mod)
@@ -42,10 +42,12 @@ function mountEditor(api) {
   globalThis.window = { addEventListener() {}, removeEventListener() {} }
   const app = renderer.createApp({ render: () => h(component, {
     ref: editor, modelValue: state.content, documentId: 1, initialRevision: 0,
+    ...overrides,
+    onSaved: () => saved.push(state.content),
     'onUpdate:modelValue': value => { state.content = value }
   }) })
   app.mount({})
-  return { state, editor, errors, destroy: () => app.unmount() }
+  return { state, editor, errors, saved, destroy: () => app.unmount() }
 }
 
 async function settleUntil(predicate) {
@@ -184,5 +186,56 @@ test('an image queued during a slow text save is included before flush completes
     release()
     await flushed
     assert.equal(saves.at(-1), '正文![后插入](/api/assets/new/content)')
+  } finally { ui.destroy() }
+})
+
+test('attachment form mode stages edits without saving the main document', async () => {
+  let saves = 0
+  const ui = mountEditor({ saveMarkdownDocument: async () => { saves++; throw new Error('wrong document') } }, {
+    persistence: 'form', libraryRole: 'teacher', contextLabel: '附件 · notes.md'
+  })
+  try {
+    ui.state.content = '# 附件新正文'
+    await nextTick()
+    await ui.editor.value.flush()
+    assert.equal(saves, 0)
+    assert.equal(ui.editor.value.$.setupState.dirty, true)
+    assert.equal(ui.editor.value.$.setupState.status, '待应用到作业')
+    await ui.editor.value.$.setupState.saveNow()
+    assert.deepEqual(ui.saved, ['# 附件新正文'])
+    assert.equal(saves, 0)
+  } finally { ui.destroy() }
+})
+
+test('attachment flush waits for teacher library uploads and never uploads into a description document', async () => {
+  let release
+  const calls = []
+  const ui = mountEditor({
+    uploadLibraryImage: async (role, file) => { calls.push({ role, name: file.name }); return new Promise(resolve => { release = resolve }) },
+    uploadMarkdownImage: () => { throw new Error('wrong upload scope') },
+    saveMarkdownDocument: () => { throw new Error('wrong save scope') }
+  }, { persistence: 'form', libraryRole: 'teacher' })
+  try {
+    ui.editor.value.$.setupState.addImages([{ name: '附件配图.png' }])
+    let done = false
+    const flushed = ui.editor.value.flush().then(() => { done = true })
+    await settleUntil(() => Boolean(release))
+    assert.equal(done, false)
+    release({ asset: { url: '/api/assets/attachment/content' } })
+    await flushed
+    assert.deepEqual(calls, [{ role: 'teacher', name: '附件配图.png' }])
+    assert.match(ui.state.content, /!\[附件配图\]\(\/api\/assets\/attachment\/content\)/)
+    assert.deepEqual(ui.errors, [])
+  } finally { ui.destroy() }
+})
+
+test('attachment form mode reuses an existing image without uploading or persisting a document', async () => {
+  const ui = mountEditor({}, { persistence: 'form', libraryRole: 'teacher' })
+  try {
+    ui.editor.value.$.setupState.insertLibraryImage({ filename: '复用.png', url: '/api/assets/reused/content' })
+    await nextTick()
+    await ui.editor.value.flush()
+    assert.match(ui.state.content, /\/api\/assets\/reused\/content/)
+    assert.deepEqual(ui.errors, [])
   } finally { ui.destroy() }
 })

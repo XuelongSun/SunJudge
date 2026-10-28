@@ -26,10 +26,10 @@ def student_class_summary(assignment_ids: list[int], student_id: int) -> dict:
         required = {item["key"] for item in requirements if item.get("required", True)}
         submitted_keys = confirmed.get(assignment.id, set())
         is_complete = required.issubset(submitted_keys) if required else bool(submitted_keys)
-        if is_complete:
-            completed.add(assignment.id)
         grade = grades.get(assignment.id)
         state = student_deadline_state(assignment, student_id, grade, requirements) if has_submissions else {"is_expired": False, "display_score": None}
+        if is_complete or state.get("submission_complete"):
+            completed.add(assignment.id)
         if state["is_expired"]:
             expired.add(assignment.id)
         if grade and grade.status == GradingResult.STATUS_PUBLISHED:

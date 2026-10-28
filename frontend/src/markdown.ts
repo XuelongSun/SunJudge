@@ -4,6 +4,16 @@ import hljs from 'highlight.js'
 import katex from 'katex'
 import type { TextFormat } from './api'
 
+export function renderFilePreview(content: string, filename: string): string {
+  const body = content.replace(/^\uFEFF/, '')
+  if (filename.toLowerCase().endsWith('.md')) return renderContent(body, 'markdown')
+  const extension = filename.toLowerCase().split('.').pop() ?? ''
+  const language = ({ py: 'python', c: 'c', cpp: 'cpp', cc: 'cpp' } as Record<string, string>)[extension] ?? ''
+  const longest = (body.match(/`+/g) ?? []).reduce((maximum, run) => Math.max(maximum, run.length), 0)
+  const fence = '`'.repeat(Math.max(3, longest + 1))
+  return renderContent(`${fence}${language}\n${body}\n${fence}`, 'markdown')
+}
+
 const markdownRenderer = new MarkdownIt({
   html: false,
   linkify: true,

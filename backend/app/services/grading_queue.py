@@ -8,7 +8,7 @@ from typing import Literal
 from flask import Flask
 
 from ..extensions import db
-from ..models import Assignment
+from ..models import Assignment, Submission
 from .grading import run_auto_grading_for_student
 
 
@@ -66,6 +66,11 @@ def _run_job(app: Flask, job: GradingJob) -> None:
     with app.app_context():
         assignment = db.session.get(Assignment, job.assignment_id)
         if not assignment:
+            return
+        # A teacher may have required resubmission while this job was queued.
+        if not Submission.query.filter_by(assignment_id=job.assignment_id, student_user_id=job.student_user_id).filter(
+            Submission.status.in_({Submission.STATUS_SUBMITTED, Submission.STATUS_LATE})
+        ).first():
             return
         try:
             run_auto_grading_for_student(assignment, job.student_user_id)

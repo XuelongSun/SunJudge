@@ -33,7 +33,8 @@ def require_student_editable(assignment: Assignment, user: User):
     if not ClassRoster.query.filter_by(class_id=assignment.class_id, matched_user_id=user.id).first():
         raise PermissionError("学生未绑定当前班级名单。")
     deadline = assignment.deadline
-    if deadline and utc_now() > deadline.replace(tzinfo=deadline.tzinfo or UTC) and not assignment.allow_late:
+    from .student_assignment_state import makeup_allowed
+    if deadline and utc_now() > deadline.replace(tzinfo=deadline.tzinfo or UTC) and not assignment.allow_late and not makeup_allowed(assignment.id, user.id):
         raise PermissionError("作业已截止，不能编辑或提交。")
     if AssignmentGrade.query.filter_by(assignment_id=assignment.id, student_user_id=user.id, status=GradingResult.STATUS_PUBLISHED).first():
         raise PermissionError("反馈已发布，不能编辑或重新提交。")
@@ -100,7 +101,7 @@ def create_image(document: MarkdownDocument | None, uploaded: FileStorage, *, te
     if not raw or len(raw) > MAX_IMAGE_BYTES:
         raise FileValidationError("单张图片必须非空且不超过 5 MB。")
     existing = MarkdownAsset.query.filter_by(**({"teacher_id": teacher_id} if teacher_id else {"student_user_id": student_user_id})).all()
-    count_limit, byte_limit = 1000, 500 * 1024 * 1024
+    count_limit, byte_limit = 1000, (500 if teacher_id else 30) * 1024 * 1024
     if len(existing) >= count_limit or sum(asset.file_size for asset in existing) + len(raw) > byte_limit:
         raise FileValidationError(f"图片数量或容量已达上限（{count_limit} 张 / {byte_limit // 1024 // 1024} MB）。")
     try:
@@ -141,6 +142,11 @@ def create_image(document: MarkdownDocument | None, uploaded: FileStorage, *, te
     return asset
 
 
+def assignment_image_contents(assignment: Assignment):
+    return [assignment.description or ""] + [item.get("content", "") for item in assignment.code_templates_json or []
+                                              if item.get("filename", "").lower().endswith('.md')]
+
+
 def can_read_asset(asset: MarkdownAsset, user: User) -> bool:
     if asset.student_user_id:
         if user.id == asset.student_user_id and user.role == User.ROLE_STUDENT:
@@ -163,8 +169,8 @@ def can_read_asset(asset: MarkdownAsset, user: User) -> bool:
         url = f"/api/assets/{asset.id}/content"
         assignments = Assignment.query.join(CourseClass).join(CourseMember, CourseMember.class_id == CourseClass.id).filter(
             Assignment.status == Assignment.STATUS_PUBLISHED, CourseMember.user_id == user.id,
-            CourseMember.role == User.ROLE_STUDENT, Assignment.description.contains(url)).all()
-        return any(url in image_sources(assignment.description or "") for assignment in assignments)
+            CourseMember.role == User.ROLE_STUDENT, Assignment.course.has(teacher_id=asset.teacher_id)).all()
+        return any(url in image_sources(content) for assignment in assignments for content in assignment_image_contents(assignment))
     document = asset.document
     if not document:
         return False
@@ -244,7 +250,7 @@ def unused_image_assets(days: int = 7) -> list[MarkdownAsset]:
     """Keep every draft, saved description and historical submission reference."""
     used = set()
     contents = [document.content for document in MarkdownDocument.query.all()]
-    contents.extend(assignment.description or "" for assignment in Assignment.query.all())
+    contents.extend(content for assignment in Assignment.query.all() for content in assignment_image_contents(assignment))
     for content in contents:
         used.update(match[1] for source in image_sources(content) if (match := ASSET_URL.fullmatch(source)))
     for submission in Submission.query.all():
@@ -256,6 +262,6 @@ def unused_image_assets(days: int = 7) -> list[MarkdownAsset]:
 def image_is_referenced(asset: MarkdownAsset) -> bool:
     url = f"/api/assets/{asset.id}/content"
     return (any(url in image_sources(document.content) for document in MarkdownDocument.query.filter(MarkdownDocument.content.contains(url)).all())
-            or any(url in image_sources(assignment.description or "") for assignment in Assignment.query.filter(Assignment.description.contains(url)).all())
+            or any(url in image_sources(content) for assignment in Assignment.query.all() for content in assignment_image_contents(assignment))
             or any(asset.id in (submission.validation_result_json or {}).get("markdown_asset_ids", [])
                    for submission in Submission.query.all()))
