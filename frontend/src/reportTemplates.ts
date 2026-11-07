@@ -1,6 +1,18 @@
 // Metadata is literal text; Markdown is intentionally preserved only in document bodies.
 export function deadlineFromInput(value: string): string | null {
-  return value ? `${value}+08:00` : null
+  return value ? new Date(value).toISOString() : null
+}
+
+export function deadlineTimeInfo(value: string) {
+  const date = value ? new Date(value) : new Date()
+  const valid = !Number.isNaN(date.getTime())
+  const minutes = -(valid ? date : new Date()).getTimezoneOffset()
+  const offset = `UTC${minutes >= 0 ? '+' : '-'}${String(Math.floor(Math.abs(minutes) / 60)).padStart(2, '0')}:${String(Math.abs(minutes) % 60).padStart(2, '0')}`
+  return {
+    timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+    offset,
+    utc: value && valid ? date.toISOString().replace('T', ' ').replace('.000Z', ' UTC') : null
+  }
 }
 
 export function reportDate(value: string | null): string {
@@ -8,7 +20,7 @@ export function reportDate(value: string | null): string {
   const date = new Date(/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`)
   if (Number.isNaN(date.getTime())) return '未设置'
   return new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
   }).format(date)
 }

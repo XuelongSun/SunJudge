@@ -239,3 +239,47 @@ test('attachment form mode reuses an existing image without uploading or persist
     assert.deepEqual(ui.errors, [])
   } finally { ui.destroy() }
 })
+
+
+test('Tab indents and Shift+Tab outdents selected Markdown lines while preserving scroll', async () => {
+  const ui = mountEditor({}, { persistence: 'form' })
+  const actions = ui.editor.value.$.setupState
+  const editor = { selectionStart: 0, selectionEnd: 5, scrollTop: 42, scrollLeft: 0,
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end } }
+  actions.textarea = editor
+  ui.state.content = '- a\nb'
+  await nextTick()
+  try {
+    let prevented = 0
+    await actions.indent({ preventDefault() { prevented++ } })
+    assert.equal(ui.state.content, '    - a\n    b')
+    await actions.indent({ shiftKey: true, preventDefault() { prevented++ } })
+    assert.equal(ui.state.content, '- a\nb')
+    assert.equal(editor.scrollTop, 42)
+    assert.equal(prevented, 2)
+  } finally { ui.destroy() }
+})
+
+test('image insertion keeps the captured middle selection and restores viewport after focus', async () => {
+  let release
+  const ui = mountEditor({ uploadLibraryImage: () => new Promise(resolve => { release = resolve }) }, { persistence: 'form', libraryRole: 'student' })
+  const actions = ui.editor.value.$.setupState
+  const editor = { selectionStart: 2, selectionEnd: 2, scrollTop: 123, scrollLeft: 9,
+    focus(options) { assert.equal(options.preventScroll, true); this.scrollTop = 999 },
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; this.scrollTop = 999 } }
+  actions.textarea = editor
+  ui.state.content = '前文后文'
+  await nextTick()
+  actions.rememberInsertion()
+  actions.addImages([{ name: '图.png' }])
+  const flushed = ui.editor.value.flush()
+  try {
+    await settleUntil(() => !!release)
+    editor.selectionStart = editor.selectionEnd = 4
+    release({ asset: { url: '/api/assets/new/content' } })
+    await flushed
+    assert.equal(ui.state.content, '前文![图](/api/assets/new/content)后文')
+    assert.equal(editor.scrollTop, 123)
+    assert.equal(editor.scrollLeft, 9)
+  } finally { ui.destroy() }
+})

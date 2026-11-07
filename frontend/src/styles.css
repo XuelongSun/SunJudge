@@ -436,6 +436,10 @@ p {
   gap: 6px;
 }
 
+.deadline-setting { display: grid; gap: 6px; min-width: 0; }
+.deadline-zone { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.deadline-utc { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+
 .material-editor-context {
   display: flex;
   flex-wrap: wrap;

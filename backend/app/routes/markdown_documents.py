@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from flask import Blueprint, abort, current_app, jsonify, request, send_file
+from flask import Blueprint, abort, current_app, jsonify, request, send_file, Response
 from flask_login import current_user, login_required
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from ..extensions import db
 from ..models import Assignment, CourseClass, MarkdownAsset, MarkdownDocument, User, utc_now
 from ..services.file_validation import FileValidationError
-from ..services.markdown_documents import asset_path, can_read_asset, create_image, image_is_referenced, require_document_owner, require_student_editable
+from ..services.markdown_documents import asset_path, can_read_asset, create_image, image_is_referenced, require_document_owner, require_student_editable, retired_image_ids
 from .permissions import roles_required
 
 
@@ -33,8 +33,10 @@ def asset_info(asset):
 @roles_required(User.ROLE_TEACHER, User.ROLE_STUDENT)
 def list_teacher_images():
     scope = library_scope()
-    assets = MarkdownAsset.query.filter_by(**scope).order_by(MarkdownAsset.created_at.desc()).all()
-    return jsonify(assets=[asset_info(asset) for asset in assets])
+    assets = MarkdownAsset.query.filter_by(**scope).filter(MarkdownAsset.deleted_at.is_(None)).order_by(MarkdownAsset.created_at.desc()).all()
+    retired = retired_image_ids(current_user.id) if current_user.role == User.ROLE_STUDENT else set()
+    assets.sort(key=lambda asset: asset.id not in retired)
+    return jsonify(assets=[{**asset_info(asset), "reviewed_only": asset.id in retired} for asset in assets])
 
 
 @markdown_bp.post("/teacher/images")
@@ -69,10 +71,15 @@ def upload_teacher_image():
 def delete_teacher_image(asset_id):
     scope = library_scope()
     asset = MarkdownAsset.query.filter_by(id=asset_id, **scope).first_or_404()
-    if image_is_referenced(asset):
+    referenced = image_is_referenced(asset)
+    if referenced and asset.id not in (retired_image_ids(current_user.id) if current_user.role == User.ROLE_STUDENT else set()):
         return jsonify(message="图片仍被作业说明或草稿引用，请移除引用后再删除，避免历史作业图片丢失。"), 409
     path = asset_path(asset)
-    db.session.delete(asset)
+    if referenced:
+        asset.deleted_at = utc_now()
+        asset.file_size = 0
+    else:
+        db.session.delete(asset)
     db.session.commit()
     path.unlink(missing_ok=True)
     return jsonify(message="图片已删除。")
@@ -209,6 +216,11 @@ def read_image(asset_id):
     asset = db.session.get(MarkdownAsset, asset_id)
     if not asset or not can_read_asset(asset, current_user):
         abort(404)
+    if asset.deleted_at:
+        response = Response('<svg xmlns="http://www.w3.org/2000/svg" width="360" height="120"><rect width="100%" height="100%" fill="#e5e7eb"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#374151" font-size="16">图片已删除 / Image removed</text></svg>', mimetype='image/svg+xml')
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
     target = asset_path(asset)
     if not target.is_file():
         abort(404)

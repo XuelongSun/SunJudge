@@ -253,7 +253,8 @@ def test_student_submission_requires_extension_and_filename_rules(client):
         content_type="multipart/form-data",
     )
     assert bad_name.status_code == 400
-    assert "OS202601-06_hw1.md" in " ".join(bad_name.get_json()["details"])
+    assert "文件命名不符合规范，请仔细阅读作业说明" in " ".join(bad_name.get_json()["details"])
+    assert "Please read the assignment instructions carefully" in bad_name.json["message"]
 
     response = client.post(
         f"/api/assignments/{assignment_id}/submissions",

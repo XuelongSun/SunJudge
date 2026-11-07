@@ -15,6 +15,10 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def utc_iso(value: datetime) -> str:
+    return value.replace(tzinfo=value.tzinfo or UTC).astimezone(UTC).isoformat()
+
+
 class User(UserMixin, db.Model):
     __tablename__ = "users"
 
@@ -58,7 +62,7 @@ class User(UserMixin, db.Model):
             "student_no": self.student_no,
             "student_number": self.student_number,
             "teacher_status": self.teacher_status,
-            "created_at": self.created_at.isoformat(),
+            "created_at": utc_iso(self.created_at),
         }
 
 
@@ -158,7 +162,7 @@ class ClassRoster(db.Model):
             "student_id": self.student_id,
             "matched_user_id": self.matched_user_id,
             "registration_status": self.registration_status,
-            "created_at": self.created_at.isoformat(),
+            "created_at": utc_iso(self.created_at),
         }
 
 
@@ -235,7 +239,7 @@ class Assignment(db.Model):
             "type": self.type,
             "description": self.description,
             "description_format": self.description_format,
-            "deadline": self.deadline.isoformat() if self.deadline else None,
+            "deadline": utc_iso(self.deadline) if self.deadline else None,
             "allow_late": self.allow_late,
             "late_policy": self.late_policy,
             "max_score": self.max_score,
@@ -250,9 +254,9 @@ class Assignment(db.Model):
                                 "preview_url": f"/api/assignments/{self.id}/code-templates/{item['id']}/preview"}
                                for item in self.code_templates_json or []],
             "status": self.status,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "created_at": utc_iso(self.created_at),
+            "updated_at": utc_iso(self.updated_at),
+            "published_at": utc_iso(self.published_at) if self.published_at else None,
         }
         if include_counts:
             roster = ClassRoster.query.filter_by(class_id=self.class_id).all()
@@ -361,9 +365,9 @@ class Submission(db.Model):
             "assignment_id": self.assignment_id,
             "student_user_id": self.student_user_id,
             "student": self.student.to_dict() if self.student else None,
-            "submitted_at": self.submitted_at.isoformat(),
+            "submitted_at": utc_iso(self.submitted_at),
             "is_makeup": self.is_makeup,
-            "effective_submitted_at": (self.effective_submitted_at or self.submitted_at).isoformat(),
+            "effective_submitted_at": utc_iso(self.effective_submitted_at or self.submitted_at),
             "original_filename": self.original_filename,
             "submission_item_key": self.submission_item_key,
             "submission_item_label": self.submission_item_label,
@@ -393,7 +397,7 @@ class AssignmentRead(db.Model):
             "id": self.id,
             "assignment_id": self.assignment_id,
             "student_user_id": self.student_user_id,
-            "read_at": self.read_at.isoformat(),
+            "read_at": utc_iso(self.read_at),
         }
 
 
@@ -423,8 +427,8 @@ class TeacherLLMConfig(db.Model):
             "model": self.model,
             "enabled": self.enabled,
             "has_api_key": bool(self.encrypted_api_key),
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at": utc_iso(self.created_at),
+            "updated_at": utc_iso(self.updated_at),
         }
 
 class JudgeRun(db.Model):
@@ -453,7 +457,7 @@ class JudgeRun(db.Model):
             "status": self.status,
             "score": self.score,
             "details": (self.details_json or {}) if include_private else _masked_judge_details(self.details_json or {}),
-            "created_at": self.created_at.isoformat(),
+            "created_at": utc_iso(self.created_at),
         }
 
 
@@ -493,8 +497,8 @@ class GradingResult(db.Model):
             "reviewed_by": self.reviewed_by,
             "status": self.status,
             "llm_details": self.llm_details_json or {},
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at": utc_iso(self.created_at),
+            "updated_at": utc_iso(self.updated_at),
         }
 
     def to_public_dict(self) -> dict[str, object]:
@@ -544,8 +548,8 @@ class AssignmentGrade(db.Model):
             "reviewed_by": self.reviewed_by,
             "status": self.status,
             "llm_details": self.llm_details_json or {},
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at": utc_iso(self.created_at),
+            "updated_at": utc_iso(self.updated_at),
         }
 
     def to_public_dict(self) -> dict[str, object]:
@@ -581,7 +585,7 @@ class MarkdownDocument(db.Model):
 
     def summary(self):
         return {"id": self.id, "revision": self.revision, "has_content": bool(self.content.strip()),
-                "pending_changes": self.revision > self.submitted_revision, "updated_at": self.updated_at.isoformat()}
+                "pending_changes": self.revision > self.submitted_revision, "updated_at": utc_iso(self.updated_at)}
 
     def to_dict(self):
         return {**self.summary(), "content": self.content, "kind": self.kind, "item_key": self.item_key}
@@ -592,6 +596,7 @@ class MarkdownAsset(db.Model):
 
     id = db.Column(db.String(32), primary_key=True)
     document_id = db.Column(db.Integer, db.ForeignKey("markdown_documents.id"), nullable=True, index=True)
+    deleted_at = db.Column(db.DateTime, nullable=True)
     teacher_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     student_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
     original_filename = db.Column(db.String(255), nullable=False)

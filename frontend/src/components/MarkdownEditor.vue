@@ -25,14 +25,60 @@ const textarea = ref<HTMLTextAreaElement>()
 const imageInput = ref<HTMLInputElement>()
 const markdownInput = ref<HTMLInputElement>()
 const libraryVisible = ref(false)
-function insertLibraryImage(image: LibraryImage) {
+let insertion: { start: number; end: number; top: number; left: number } | undefined
+function rememberInsertion() {
   const editor = textarea.value
-  const start = editor?.selectionStart ?? props.modelValue.length
-  const end = editor?.selectionEnd ?? start
-  const text = `![${markdownText(image.filename)}](${image.url})`
+  if (editor) insertion = { start: editor.selectionStart, end: editor.selectionEnd, top: editor.scrollTop, left: editor.scrollLeft }
+}
+async function insertText(text: string) {
+  const editor = textarea.value
+  const position = insertion ?? { start: editor?.selectionStart ?? props.modelValue.length, end: editor?.selectionEnd ?? props.modelValue.length, top: editor?.scrollTop ?? 0, left: editor?.scrollLeft ?? 0 }
+  const start = Math.min(position.start, props.modelValue.length)
+  const end = Math.min(position.end, props.modelValue.length)
   emit('update:modelValue', props.modelValue.slice(0, start) + text + props.modelValue.slice(end))
+  await nextTick()
+  editor?.focus({ preventScroll: true })
+  editor?.setSelectionRange(start + text.length, start + text.length)
+  if (editor) { editor.scrollTop = position.top; editor.scrollLeft = position.left }
+  insertion = { ...position, start: start + text.length, end: start + text.length }
+}
+async function indent(event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return
+  event.preventDefault()
+  const editor = textarea.value
+  if (!editor) return
+  const { selectionStart: start, selectionEnd: end, scrollTop: top } = editor
+  const source = props.modelValue
+  const begin = start === 0 ? 0 : source.lastIndexOf('\n', start - 1) + 1
+  const lineEnd = source.indexOf('\n', start)
+  const finish = start === end && event.shiftKey ? (lineEnd < 0 ? source.length : lineEnd) : end > start && source[end - 1] === '\n' ? end - 1 : end
+  let next: string, left: number, right: number
+  if (start === end && !event.shiftKey) {
+    next = source.slice(0, start) + '    ' + source.slice(end)
+    left = right = start + 4
+  } else {
+    const lines = source.slice(begin, finish).split('\n')
+    let removedFirst = 0, delta = 0
+    const changed = lines.map((line, index) => {
+      const removed = event.shiftKey ? (line.match(/^(?:\t| {1,4})/)?.[0].length ?? 0) : 0
+      if (index === 0) removedFirst = removed
+      delta += event.shiftKey ? -removed : 4
+      return event.shiftKey ? line.slice(removed) : '    ' + line
+    }).join('\n')
+    next = source.slice(0, begin) + changed + source.slice(finish)
+    left = event.shiftKey ? Math.max(begin, start - removedFirst) : start + 4
+    right = Math.max(left, end + delta)
+  }
+  emit('update:modelValue', next)
+  await nextTick()
+  editor.setSelectionRange(left, right)
+  editor.scrollTop = top
+  rememberInsertion()
+}
+function insertLibraryImage(image: LibraryImage) {
+  const text = `![${markdownText(image.filename)}](${image.url})`
   libraryVisible.value = false
-  void nextTick(() => { editor?.focus(); editor?.setSelectionRange(start + text.length, start + text.length) })
+  void insertText(text)
 }
 const saving = ref(false)
 const uploading = ref(0)
@@ -114,14 +160,8 @@ function addImages(files: File[]) {
         const result = localForm.value && props.libraryRole
           ? await api.uploadLibraryImage(props.libraryRole, file)
           : await api.uploadMarkdownImage(props.documentId!, file)
-        const editor = textarea.value
-        const start = editor?.selectionStart ?? props.modelValue.length
-        const end = editor?.selectionEnd ?? start
         const text = `![${markdownText(file.name.replace(/\.[^.]+$/, '') || '图片')}](${result.asset.url})`
-        emit('update:modelValue', props.modelValue.slice(0, start) + text + props.modelValue.slice(end))
-        await nextTick()
-        editor?.focus()
-        editor?.setSelectionRange(start + text.length, start + text.length)
+        await insertText(text)
       } catch (error) {
         ElMessage.error(`图片上传失败：${(error as Error).message}`)
       } finally {
@@ -178,8 +218,8 @@ async function saveNow() {
   <section class="online-markdown-editor" @dragover.prevent @drop="dropImages">
     <div class="markdown-editor-toolbar">
       <div class="toolbar-actions markdown-editor-buttons">
-        <el-button type="primary" :loading="uploading > 0" @click="imageInput?.click()">插入图片</el-button>
-        <el-button v-if="libraryRole" @click="libraryVisible = true">从图片库选择</el-button>
+        <el-button type="primary" :loading="uploading > 0" @mousedown.prevent="rememberInsertion" @click="rememberInsertion(); imageInput?.click()">插入图片</el-button>
+        <el-button v-if="libraryRole" @mousedown.prevent="rememberInsertion" @click="rememberInsertion(); libraryVisible = true">从图片库选择</el-button>
         <el-button @click="markdownInput?.click()">导入 .md</el-button>
         <el-button @click="downloadMarkdown">下载 .md</el-button>
         <el-button v-if="!localForm" :loading="saving" @click="saveNow">保存草稿</el-button>
@@ -193,7 +233,7 @@ async function saveNow() {
     </el-dialog>
     <div class="markdown-edit-grid">
       <label class="markdown-source-panel">
-        <textarea ref="textarea" :value="modelValue" spellcheck="false" :aria-label="contextLabel ? `${contextLabel} 正文` : 'Markdown 正文'" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)" @paste="pasteImages" @keydown.ctrl.s.prevent="saveNow" @keydown.meta.s.prevent="saveNow" />
+        <textarea ref="textarea" :value="modelValue" spellcheck="false" :aria-label="contextLabel ? `${contextLabel} 正文` : 'Markdown 正文'" @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value); rememberInsertion()" @click="rememberInsertion" @keyup="rememberInsertion" @select="rememberInsertion" @paste="rememberInsertion(); pasteImages($event)" @keydown.tab="indent" @keydown.ctrl.s.prevent="saveNow" @keydown.meta.s.prevent="saveNow" />
       </label>
       <section class="markdown-live-preview" :aria-label="contextLabel ? `${contextLabel} 预览` : 'Markdown 预览'">
         <div class="assignment-rendered" v-html="renderContent(previewSource ?? modelValue, 'markdown')" />

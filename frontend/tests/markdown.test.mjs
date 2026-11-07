@@ -18,15 +18,58 @@ function loadTypeScript(name) {
   module._compile(compiled, filename)
   return module.exports
 }
+process.env.TZ = 'Asia/Shanghai'
+
 const { renderContent, renderFilePreview } = loadTypeScript('markdown')
-const { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput } = loadTypeScript('reportTemplates')
+const { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput, deadlineTimeInfo } = loadTypeScript('reportTemplates')
 const { aiResultRows } = loadTypeScript('gradingPresentation')
 const { progressPercent, filenamePreview, insertAtSelection, completionSegments } = loadTypeScript('presentation')
+
+test('Bash fenced blocks preserve dollar substitutions without creating math or placeholders', () => {
+  const command = 'for i in $(seq -w 1 20); do touch info_${i}.txt; done'
+  const html = renderContent(`\`\`\`bash\n${command}\n\`\`\``, 'markdown')
+  assert.match(html, /class="hljs"/)
+  assert.equal(html.replace(/<[^>]*>/g, '').trim(), command)
+  assert.doesNotMatch(html, /katex|SUNJUDGE_MATH/)
+  const preview = renderFilePreview('command = "$(seq -w 1 20) ${i}"', 'framework.py')
+  assert.match(preview.replace(/<[^>]*>/g, ''), /\$\(seq -w 1 20\) \$\{i\}/)
+  assert.doesNotMatch(preview, /katex|SUNJUDGE_MATH/)
+})
+
+test('all code contexts keep literal dollars and display math delimiters', () => {
+  for (const source of ['~~~bash\necho $HOME ${USER} $$\n~~~',
+    '    echo $HOME ${USER} $$', '> ```bash\n> echo $HOME ${USER} $$\n> ```',
+    '- 框架\n\n  ```bash\n  echo $HOME ${USER} $$\n  ```',
+    '```text\n$$\nx^2\n$$\n```', '`echo $HOME ${USER}`', '``echo `pwd` $HOME ${USER}``']) {
+    const html = renderContent(source, 'markdown')
+    assert.doesNotMatch(html, /katex|SUNJUDGE_MATH/, source)
+    assert.match(html, /\$/)
+  }
+})
+
+test('math stays enabled outside code, with inline and multi-line display formulas', () => {
+  const html = renderContent('公式 $x^2$，命令 `echo $HOME ${USER}`\n\n$$\nx^2 + y^2\n$$\n\n$$z^2$$', 'markdown')
+  assert.match(html, /class="katex"/)
+  assert.equal((html.match(/class="katex-display"/g) ?? []).length, 2)
+  assert.match(html, /<code>echo \$HOME \$\{USER\}<\/code>/)
+  for (const source of ['> $$\n> x^2\n> $$', '- 公式\n\n  $$\n  x^2\n  $$']) {
+    assert.match(renderContent(source, 'markdown'), /class="katex-display"/)
+  }
+  assert.doesNotMatch(renderContent('$$unclosed\n\ntext', 'markdown'), /katex/)
+})
+
+test('escaped dollars, link destinations and old placeholder text are not turned into math HTML', () => {
+  const html = renderContent('\\$x\\$ [链接](/files/$x$.md) SUNJUDGE_MATH_INLINE_0 以及 $y^2$', 'markdown')
+  assert.match(html, /\$x\$/)
+  assert.match(html, /href="\/files\/\$x\$\.md"/)
+  assert.match(html, /SUNJUDGE_MATH_INLINE_0/)
+  assert.equal((html.match(/class="katex"/g) ?? []).length, 1)
+})
 
 test('deadline input, saved UTC time and Markdown preview round trip in Shanghai time', () => {
   const input = '2030-10-11T23:59:00'
   const payload = deadlineFromInput(input)
-  assert.equal(payload, '2030-10-11T23:59:00+08:00')
+  assert.equal(payload, '2030-10-11T15:59:00.000Z')
   assert.equal(new Date(payload).toISOString(), '2030-10-11T15:59:00.000Z')
   assert.equal(reportDate(payload), '2030-10-11 23:59:00')
   assert.equal(reportDate('2030-10-11T15:59:00').replace(' ', 'T'), input)
@@ -148,4 +191,41 @@ test('shared file preview renders Markdown and fences code safely including BOM 
   assert.doesNotMatch(html, /<script>|<h1>/)
   assert.match(html, /code heading/)
   assert.doesNotMatch(renderFilePreview('<img src=x>', 'unknown.txt'), /<img/)
+})
+
+
+test('deadline entry follows the browser timezone including daylight saving', () => {
+  const original = process.env.TZ
+  try {
+    for (const [zone, date, expected] of [
+      ['Asia/Shanghai', '2030-11-05T22:00:00', '2030-11-05T14:00:00.000Z'],
+      ['America/New_York', '2030-07-05T22:00:00', '2030-07-06T02:00:00.000Z'],
+      ['America/New_York', '2030-11-05T22:00:00', '2030-11-06T03:00:00.000Z']]) {
+      process.env.TZ = zone
+      assert.equal(deadlineFromInput(date), expected)
+      assert.equal(reportDate(expected).replace(' ', 'T'), date)
+    }
+  } finally { process.env.TZ = original }
+})
+
+
+test('deadline verification shows browser zone, selected-date offset and the exact UTC payload', () => {
+  const original = process.env.TZ
+  try {
+    for (const [zone, value, offset, utc] of [
+      ['Asia/Shanghai', '2030-11-05T22:00:00', 'UTC+08:00', '2030-11-05 14:00:00 UTC'],
+      ['America/New_York', '2030-07-05T22:00:00', 'UTC-04:00', '2030-07-06 02:00:00 UTC'],
+      ['America/New_York', '2030-11-05T22:00:00', 'UTC-05:00', '2030-11-06 03:00:00 UTC'],
+      ['Asia/Kathmandu', '2030-11-05T22:00:00', 'UTC+05:45', '2030-11-05 16:15:00 UTC'],
+      ['UTC', '2030-11-05T22:00:00', 'UTC+00:00', '2030-11-05 22:00:00 UTC']]) {
+      process.env.TZ = zone
+      const result = deadlineTimeInfo(value)
+      assert.ok(result.timeZone)
+      assert.equal(result.offset, offset)
+      assert.equal(result.utc, utc)
+      assert.equal(result.utc.replace(' UTC', '.000Z').replace(' ', 'T'), deadlineFromInput(value))
+    }
+    assert.equal(deadlineTimeInfo('').utc, null)
+    assert.equal(deadlineTimeInfo('invalid').utc, null)
+  } finally { process.env.TZ = original }
 })

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput } from './reportTemplates'
+import { homeworkMarkdown, feedbackMarkdown, reportDate, deadlineFromInput, deadlineTimeInfo } from './reportTemplates'
 import { aiResultRows } from './gradingPresentation'
 import { progressPercent, filenamePreview, insertAtSelection } from './presentation'
 import ProgressCard from './components/ProgressCard.vue'
@@ -182,6 +182,8 @@ const editingProgramEvaluationIndex = ref<number | null>(null)
 const editingAiEvaluationIndex = ref<number | null>(null)
 const submittingAssignment = ref<Assignment | null>(null)
 const submittingRequirement = ref<SubmissionRequirement | null>(null)
+const submissionOpening = ref(false)
+let submissionOpenRequest = 0
 const reviewingSubmission = ref<Submission | null>(null)
 const reviewingSubmissionRow = ref<AssignmentSubmissionRow | null>(null)
 const reviewFileForms = ref<FileReview[]>([])
@@ -307,6 +309,7 @@ const llmConfigForm = reactive({
 })
 
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
+const deadlineTimeDetails = computed(() => deadlineTimeInfo(assignmentForm.deadline))
 const isTeacher = computed(() => currentUser.value?.role === 'teacher')
 const pendingTeachers = computed(() => teachers.value.filter((teacher) => teacher.teacher_status === 'pending'))
 const currentClass = computed(() => adminClasses.value.find((item) => item.id === selectedClassId.value))
@@ -549,7 +552,7 @@ function submissionActionLabel(assignment: Assignment, key: string) {
 }
 
 function canSubmitRequirement(assignment: Assignment) {
-  return !assignment.is_expired && assignment.assignment_grade?.status !== 'published'
+  return (assignment.makeup_allowed || !assignment.is_expired) && assignment.assignment_grade?.status !== 'published'
 }
 
 function canConfirmAssignmentSubmission(assignment: Assignment) {
@@ -1141,6 +1144,8 @@ async function submitRegister() {
 }
 
 async function logout() {
+  submissionOpenRequest++
+  submissionOpening.value = false
   await api.logout()
   materialEditorVisible.value = false
   editingMaterial.value = null
@@ -2189,19 +2194,38 @@ async function loadStudentAssignments(classId: number) {
 }
 
 async function openSubmissionDialog(assignment: Assignment, requirement: SubmissionRequirement, uploadFile = false) {
-  submittingAssignment.value = assignment
-  submittingRequirement.value = requirement
-  selectedSubmissionFile.value = null
-  if (requirement.allowed_extensions.includes('.md') && !uploadFile) {
-    try {
-      const result = await api.openMarkdownDocument({ class_id: assignment.class_id, assignment_id: assignment.id, kind: 'submission', item_key: requirement.key })
+  const request = ++submissionOpenRequest
+  const classId = selectedStudentClassId.value
+  submissionOpening.value = true
+  const active = () => request === submissionOpenRequest && selectedStudentClassId.value === classId && currentUser.value?.role === 'student'
+  try {
+    const { assignment: fresh } = await api.markAssignmentRead(assignment.id)
+    if (!active()) return
+    const index = studentAssignments.value.findIndex(item => item.id === fresh.id)
+    if (index >= 0) studentAssignments.value.splice(index, 1, fresh)
+    if (!canSubmitRequirement(fresh)) {
+      ElMessage.warning(fresh.assignment_grade?.status === 'published' ? '反馈已发布，请联系教师退回重交' : '作业已截止，尚未获得补交权限')
+      return
+    }
+    const freshRequirement = fresh.submission_requirements.find(item => item.key === requirement.key)
+    if (!freshRequirement) { ElMessage.warning('提交项已变更，请重新选择'); return }
+    submittingAssignment.value = fresh
+    submittingRequirement.value = freshRequirement
+    selectedSubmissionFile.value = null
+    if (freshRequirement.allowed_extensions.includes('.md') && !uploadFile) {
+      const result = await api.openMarkdownDocument({ class_id: fresh.class_id, assignment_id: fresh.id, kind: 'submission', item_key: freshRequirement.key })
+      if (!active()) return
       studentMarkdownDocument.value = result.document
       studentMarkdownContent.value = result.document.content
       markdownDialogVisible.value = true
-    } catch (error) { ElMessage.error((error as Error).message) }
-    return
+      return
+    }
+    submissionDialogVisible.value = true
+  } catch (error) {
+    if (active()) ElMessage.error((error as Error).message)
+  } finally {
+    if (request === submissionOpenRequest) submissionOpening.value = false
   }
-  submissionDialogVisible.value = true
 }
 
 async function confirmCloseUnsavedEditor(error: unknown, done: () => void) {
@@ -2230,11 +2254,11 @@ async function uploadAlternativeFormat() {
 
 async function selectStudentAssignment(row: Assignment) {
   selectedStudentAssignmentId.value = row.id
-  if (!row.read_at) {
+  {
     try {
       const result = await api.markAssignmentRead(row.id)
       const index = studentAssignments.value.findIndex((item) => item.id === row.id)
-      if (index >= 0) {
+      if (index >= 0 && selectedStudentClassId.value === row.class_id) {
         studentAssignments.value.splice(index, 1, result.assignment)
       }
     } catch (error) {
@@ -2604,10 +2628,10 @@ onMounted(() => {
               </el-table-column>
               <el-table-column label="操作" min-width="230">
                 <template #default="{ row }">
-                  <el-button type="primary" :icon="Upload" :disabled="!canSubmitRequirement(selectedStudentAssignment)" @click="openSubmissionDialog(selectedStudentAssignment, row)">
+                  <el-button type="primary" :icon="Upload" :loading="submissionOpening" :disabled="submissionOpening || selectedStudentAssignment.assignment_grade?.status === 'published'" @click="openSubmissionDialog(selectedStudentAssignment, row)">
                     {{ row.allowed_extensions.includes('.md') ? '在线编辑' : submissionActionLabel(selectedStudentAssignment, row.key) }}
                   </el-button>
-                  <el-button v-if="row.allowed_extensions.includes('.md')" :icon="Upload" :disabled="!canSubmitRequirement(selectedStudentAssignment)" @click="openSubmissionDialog(selectedStudentAssignment, row, true)">上传文件</el-button>
+                  <el-button v-if="row.allowed_extensions.includes('.md')" :icon="Upload" :loading="submissionOpening" :disabled="submissionOpening || selectedStudentAssignment.assignment_grade?.status === 'published'" @click="openSubmissionDialog(selectedStudentAssignment, row, true)">上传文件</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -3378,7 +3402,11 @@ onMounted(() => {
           </div>
           <div class="form-grid wide">
             <el-form-item label="截止时间">
-              <el-date-picker v-model="assignmentForm.deadline" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" />
+              <div class="deadline-setting">
+                <el-date-picker v-model="assignmentForm.deadline" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" />
+                <span class="deadline-zone">输入时区：{{ deadlineTimeDetails.timeZone }}（{{ deadlineTimeDetails.offset }}）</span>
+                <span v-if="deadlineTimeDetails.utc" class="deadline-utc" aria-live="polite">{{ deadlineTimeDetails.utc }}</span>
+              </div>
             </el-form-item>
             <el-form-item label="允许迟交">
               <el-switch v-model="assignmentForm.allow_late" />

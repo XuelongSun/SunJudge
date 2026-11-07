@@ -29,6 +29,46 @@ const markdownRenderer = new MarkdownIt({
 
 markdownRenderer.use(markdownEmoji)
 
+// Parse math as Markdown tokens, so code and link destinations stay untouched.
+markdownRenderer.inline.ruler.after('escape', 'math_inline', (state, silent) => {
+  const start = state.pos
+  if (state.src[start] !== '$' || state.src[start + 1] === '$' || state.src[start - 1] === '$') return false
+  for (let end = start + 1; end < state.posMax; end++) {
+    const character = state.src[end]
+    if (character === '\n') break
+    if (character === '\\') { end++; continue }
+    if (character !== '$') continue
+    const formula = state.src.slice(start + 1, end)
+    if (!formula.trim()) return false
+    if (!silent) state.push('math_inline', 'math', 0).content = formula
+    state.pos = end + 1
+    return true
+  }
+  return false
+})
+
+markdownRenderer.block.ruler.after('fence', 'math_block', (state, startLine, endLine, silent) => {
+  if (state.sCount[startLine]! - state.blkIndent >= 4) return false
+  const start = state.bMarks[startLine]! + state.tShift[startLine]!
+  if (state.src.slice(start, start + 2) !== '$$') return false
+  for (let line = startLine; line < endLine; line++) {
+    if (line > startLine && !state.isEmpty(line) && state.sCount[line]! < state.blkIndent) break
+    const lineStart = state.bMarks[line]! + state.tShift[line]!
+    const text = state.src.slice(lineStart, state.eMarks[line]).trimEnd()
+    if (!text.endsWith('$$') || (line === startLine && text.length < 4)) continue
+    if (silent) return true
+    const token = state.push('math_block', 'math', 0)
+    token.content = state.getLines(startLine, line + 1, state.blkIndent, false).trim().slice(2, -2)
+    token.map = [startLine, line + 1]
+    state.line = line + 1
+    return true
+  }
+  return false
+}, { alt: ['paragraph', 'reference', 'blockquote', 'list'] })
+
+markdownRenderer.renderer.rules.math_inline = (tokens, index) => renderMath(tokens[index]!.content, false)
+markdownRenderer.renderer.rules.math_block = (tokens, index) => `${renderMath(tokens[index]!.content, true)}\n`
+
 markdownRenderer.renderer.rules.table_open = (tokens, index, options, _env, renderer) => {
   const headers: string[] = []
   for (let cursor = index + 1; cursor < tokens.length && tokens[cursor].type !== 'thead_close'; cursor++) {
@@ -46,27 +86,7 @@ export function renderContent(value: string | null, format: TextFormat) {
   if (format !== 'markdown') {
     return escapeHtml(text).replace(/\n/g, '<br>')
   }
-  const { source, tokens } = tokenizeMath(text)
-  let html = markdownRenderer.render(source)
-  tokens.forEach((token) => {
-    html = html.split(token.placeholder).join(token.html)
-  })
-  return html
-}
-
-function tokenizeMath(text: string) {
-  const tokens: Array<{ placeholder: string; html: string }> = []
-  let source = text.replace(/(^|\n)\$\$([\s\S]+?)\$\$(?=\n|$)/g, (match, prefix: string, formula: string) => {
-    const placeholder = `SUNJUDGE_MATH_BLOCK_${tokens.length}`
-    tokens.push({ placeholder, html: renderMath(formula, true) })
-    return `${prefix}${placeholder}`
-  })
-  source = source.replace(/\$([^$\n]+?)\$/g, (match, formula: string) => {
-    const placeholder = `SUNJUDGE_MATH_INLINE_${tokens.length}`
-    tokens.push({ placeholder, html: renderMath(formula, false) })
-    return placeholder
-  })
-  return { source, tokens }
+  return markdownRenderer.render(text)
 }
 
 function renderMath(formula: string, displayMode: boolean) {

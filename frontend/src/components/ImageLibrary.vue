@@ -27,7 +27,7 @@ async function upload(event: Event) {
   finally { await refresh() }
 }
 async function remove(image: LibraryImage) {
-  try { await ElMessageBox.confirm(`删除图片“${image.filename}”？被作业引用的图片会受到保护。`, '删除图片', { type: 'warning' }) }
+  try { await ElMessageBox.confirm(`删除图片“${image.filename}”？已批改引用将显示占位图，未批改引用受保护。`, '删除图片', { type: 'warning' }) }
   catch { return }
   try { await api.deleteLibraryImage(props.role, image.id); await refresh() }
   catch (error) { ElMessage.error((error as Error).message) }
@@ -47,6 +47,7 @@ onMounted(refresh)
     <div class="teacher-image-grid">
       <article v-for="(image, index) in images" :key="image.id" class="teacher-image-card">
         <el-image :src="image.url" :alt="image.filename" fit="contain" loading="lazy" :preview-src-list="previewUrls" :initial-index="index" preview-teleported />
+        <el-tag v-if="image.reviewed_only" size="small" type="info">仅已批改引用</el-tag>
         <span class="teacher-image-name" :title="image.filename">{{ image.filename }}</span>
         <div>
           <el-button v-if="selectable" type="primary" size="small" @click="emit('select', image)">插入</el-button>

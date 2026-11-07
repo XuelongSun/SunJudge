@@ -73,15 +73,15 @@
 | --- | --- | --- | --- | --- | --- |
 | GET | `/api/teacher/images` | teacher, student | — | 文件响应 | [list_teacher_images](../backend/app/routes/markdown_documents.py#L34) |
 | GET | `/api/student/images` | teacher, student | — | 文件响应 | [list_teacher_images](../backend/app/routes/markdown_documents.py#L34) |
-| POST | `/api/teacher/images` | teacher, student | request.files.file | 文件响应 | [upload_teacher_image](../backend/app/routes/markdown_documents.py#L44) |
-| POST | `/api/student/images` | teacher, student | request.files.file | 文件响应 | [upload_teacher_image](../backend/app/routes/markdown_documents.py#L44) |
-| DELETE | `/api/teacher/images/<asset_id>` | teacher, student | — | 文件响应 | [delete_teacher_image](../backend/app/routes/markdown_documents.py#L69) |
-| DELETE | `/api/student/images/<asset_id>` | teacher, student | — | 文件响应 | [delete_teacher_image](../backend/app/routes/markdown_documents.py#L69) |
-| POST | `/api/markdown-documents` | 登录用户 | payload.assignment_id; payload.class_id; payload.item_key; payload.kind | 文件响应 | [open_document](../backend/app/routes/markdown_documents.py#L94) |
-| GET | `/api/markdown-documents/<int:document_id>` | 登录用户 | — | 文件响应 | [get_document](../backend/app/routes/markdown_documents.py#L149) |
-| PUT | `/api/markdown-documents/<int:document_id>` | 登录用户 | payload.content; payload.revision | 文件响应 | [save_document](../backend/app/routes/markdown_documents.py#L155) |
-| POST | `/api/markdown-documents/<int:document_id>/images` | 登录用户 | request.files.file | 文件响应 | [upload_image](../backend/app/routes/markdown_documents.py#L183) |
-| GET | `/api/assets/<string:asset_id>/content` | 登录用户 | — | 文件响应 | [read_image](../backend/app/routes/markdown_documents.py#L208) |
+| POST | `/api/teacher/images` | teacher, student | request.files.file | 文件响应 | [upload_teacher_image](../backend/app/routes/markdown_documents.py#L46) |
+| POST | `/api/student/images` | teacher, student | request.files.file | 文件响应 | [upload_teacher_image](../backend/app/routes/markdown_documents.py#L46) |
+| DELETE | `/api/teacher/images/<asset_id>` | teacher, student | — | 文件响应 | [delete_teacher_image](../backend/app/routes/markdown_documents.py#L71) |
+| DELETE | `/api/student/images/<asset_id>` | teacher, student | — | 文件响应 | [delete_teacher_image](../backend/app/routes/markdown_documents.py#L71) |
+| POST | `/api/markdown-documents` | 登录用户 | payload.assignment_id; payload.class_id; payload.item_key; payload.kind | 文件响应 | [open_document](../backend/app/routes/markdown_documents.py#L101) |
+| GET | `/api/markdown-documents/<int:document_id>` | 登录用户 | — | 文件响应 | [get_document](../backend/app/routes/markdown_documents.py#L156) |
+| PUT | `/api/markdown-documents/<int:document_id>` | 登录用户 | payload.content; payload.revision | 文件响应 | [save_document](../backend/app/routes/markdown_documents.py#L162) |
+| POST | `/api/markdown-documents/<int:document_id>/images` | 登录用户 | request.files.file | 文件响应 | [upload_image](../backend/app/routes/markdown_documents.py#L190) |
+| GET | `/api/assets/<string:asset_id>/content` | 登录用户 | — | 文件响应 | [read_image](../backend/app/routes/markdown_documents.py#L215) |
 
 ## 运维
 

@@ -8,7 +8,7 @@
 - 鉴权：Flask-Login Session Cookie，不使用 Bearer Token。浏览器请求携带 `credentials: 'include'`；命令行使用 cookie jar。
 - JSON 写请求设置 `Content-Type: application/json`。上传为 multipart，浏览器自动生成 boundary，不手动设置 Content-Type。
 - **生产 POST/PUT/PATCH/DELETE 必须携带精确匹配 TRUSTED_ORIGINS 的 Origin**，包括登录和注册；缺失、`null`、其他子域名均返回 403。浏览器同源写请求会自动发送；curl/其他客户端需显式设置。该校验无需 CSRF Token。
-- 整数路径参数必须为正整数业务 ID。列表目前没有分页。时间输出为 ISO datetime；写入 deadline 建议显式使用 `+08:00` 或 `Z`，无时区输入按 UTC 处理。
+- 整数路径参数必须为正整数业务 ID。列表目前没有分页。时间输出为 ISO datetime；写入deadline必须包含用户时区偏移或Z，无时区输入返回400。作业deadline及模型时间返回显式UTC偏移。
 - 常见错误体为 `{"message":"原因"}`，部分含 `details`、`missing_keys`、`invalid_students` 等。400 参数错误；401 未登录/凭据错误；403 权限、来源、截止时间等；404 资源不存在或不可管理；409 冲突；413 超限。Nginx 可能返回 HTML 413/429，客户端不能假设所有响应均为 JSON。
 - 管理员不创建教学班、不导入或维护名单、不批改。`/admin` 是管理侧路径前缀，不意味着管理员可以执行所有操作。以索引中实际角色为准，教师只管理自己的教学班。
 
@@ -132,11 +132,18 @@ GET/PUT `/admin/llm-config`，仅教师自身。PUT 为 `{base_url,model,api_key
 - `GET /assets/{id}/content`：教师库图片供本人或引用它的已发布作业所在班级的学生读取，其他人404。学生报告图片仍沿用文档及已提交快照权限。
 - `POST /admin/classes/import-excel` 新增表单字段 `preview=true`：只解析返回200 `{student_count}`，不修改名单/课程；正式导入传 `mode=append`（默认，只新增）或 `replace`（更新未绑定项并删除文件中不存在的未绑定项）。返回新增 `removed_count`、`preserved_registered_count`；已绑定项不会覆盖或删除，姓名/学号冲突409。
 - 教师作业计数、成绩分析、CSV与ScoreManagerCLI导出排除当前教学班编号00；名单查询仍返回00。`GET /admin/assignments/{id}/submissions` 的 `submissions` 仅含普通学生，新增 `test_submissions` 单独返回00名单项（未提交时也返回），结构相同并支持现有预览、批改、重测和退回接口；没有00时为 `[]`。
-- `deadline` 中带时区的输入在写库前统一转UTC，前端固定使用北京时间+08:00；无时区API输入仍按UTC兼容旧调用方。
+- `deadline` 中带时区的输入在写库前统一转UTC，前端按浏览器本地时间输入并提交UTC ISO，显示与重新编辑也使用浏览器时区；无时区API输入拒绝，避免猜测用户时区。
 
 
 ## 学生图片库（2026-10-11）
 
-`GET /student/images`、`POST /student/images`（multipart file）及`DELETE /student/images/{id}`与教师图片库响应结构一致，仅学生本人可管理；教师端路径仍只允许教师使用，不能用切换路径跨角色访问。新字段markdown_assets.student_user_id通过迁移f5b20c8d316a回填既有报告图片所有者。GET图片内容允许学生本人，教师只有在自己的已确认作业快照中实际引用该图片时可读；其他学生及不相关教师404。图片可跨自己的报告复用，删除引用中的图片409。独立库上传不受某次作业截止限制；作业草稿编辑、图片上传与确认仍执行截止/补交权限/成绩发布限制。学生个人库1000张/30MB（教师仍500MB），报告引用50张/50MB；旧库超额不删图，禁止新增直到释放容量。两种上传路径共用配额检查。
+`GET /student/images`、`POST /student/images`（multipart file）及`DELETE /student/images/{id}`与教师图片库响应结构一致，仅学生本人可管理；教师端路径仍只允许教师使用，不能用切换路径跨角色访问。新字段markdown_assets.student_user_id通过迁移f5b20c8d316a回填既有报告图片所有者。GET图片内容允许学生本人，教师只有在自己的已确认作业快照中实际引用该图片时可读；其他学生及不相关教师404。图片可跨自己的报告复用。未批改作业引用的图片删除409；仅被已复核/已发布成绩的作业引用时可删除原图，保留元数据并返回鉴权SVG占位图，列表以reviewed_only标记且优先显示。这类记录deleted_at非空、file_size归零，不计个人库配额；既有正文和快照不改写，可继续保存其原图片链接。教师已引用说明图片仍受保护。独立库上传不受某次作业截止限制；作业草稿编辑、图片上传与确认仍执行截止/补交权限/成绩发布限制。学生个人库1000张/30MB（教师仍500MB），报告引用50张/50MB；旧库超额不删图，禁止新增直到释放容量。两种上传路径共用配额检查。
 
 直接上传.md而未打开在线编辑器时，确认提交也会解析库图片引用并记录快照引用ID，执行相同所有权及配额检查；不接受本地或外部图片引用。旧的个人图片自动归库后不再被未引用图片定时清理删除。
+
+
+## 2026-11-06 修复说明
+
+- 新迁移d0f64121753e新增markdown_assets.deleted_at。上线前先db upgrade，返回占位图仍须本人/原作业教师权限，外人404。
+- 文件名校验失败统一消息：文件命名不符合规范，请仔细阅读作业说明 / Filename does not meet the requirements. Please read the assignment instructions carefully.
+- 图片清理不删除作业或成绩，不自动批量删除图片。已批改引用优先展示，由用户逐张确认删除。

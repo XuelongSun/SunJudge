@@ -173,7 +173,7 @@ def validate_submission_file(
 
     if filename_only:
         checks = [
-            _check(filename == expected_filename, f"Filename should be {expected_filename}."),
+            _check(filename == expected_filename, "文件命名不符合规范，请仔细阅读作业说明 / Filename does not meet the requirements. Please read the assignment instructions carefully."),
         ]
     else:
         allowed_text = ", ".join(allowed_extensions)
@@ -181,14 +181,14 @@ def validate_submission_file(
             _check(extension in allowed_extensions, "File extension must be one of: " + allowed_text + "."),
             _check(size > 0, "Submitted file cannot be empty."),
             _check(size <= max_size, "File must not exceed " + str(rules["max_size_mb"]) + " MB."),
-            _check(filename == expected_filename, f"Filename should be {expected_filename}."),
+            _check(filename == expected_filename, "文件命名不符合规范，请仔细阅读作业说明 / Filename does not meet the requirements. Please read the assignment instructions carefully."),
         ]
         if check_content:
             checks.extend(_basic_content_checks(uploaded_file.stream, extension))
 
     failed = [str(check["message"]) for check in checks if not check["ok"]]
     if failed:
-        raise FileValidationError("Submission file did not pass validation.", failed)
+        raise FileValidationError(failed[0], failed)
     return FileValidationResult(
         ok=True,
         filename=filename,
@@ -224,7 +224,7 @@ def validate_saved_submission_file(
         _check(extension in allowed_extensions, "File extension must be one of: " + allowed_text + "."),
         _check(size > 0, "Submitted file cannot be empty."),
         _check(size <= max_size, "File must not exceed " + str(rules["max_size_mb"]) + " MB."),
-        _check(filename == expected_filename, f"Filename should be {expected_filename}."),
+        _check(filename == expected_filename, "文件命名不符合规范，请仔细阅读作业说明 / Filename does not meet the requirements. Please read the assignment instructions carefully."),
     ]
     if file_path.exists():
         with file_path.open("rb") as stream:
@@ -232,7 +232,7 @@ def validate_saved_submission_file(
 
     failed = [str(check["message"]) for check in checks if not check["ok"]]
     if failed:
-        raise FileValidationError("Submission file did not pass validation.", failed)
+        raise FileValidationError(failed[0], failed)
     return FileValidationResult(
         ok=True,
         filename=filename,

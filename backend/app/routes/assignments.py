@@ -1523,7 +1523,7 @@ def _parse_datetime(value: object) -> datetime | None:
         raise ValueError("Deadline must be an ISO datetime string.")
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+        raise ValueError("截止时间必须包含时区 / Deadline must include a timezone offset.")
     return parsed.astimezone(UTC)
 
 

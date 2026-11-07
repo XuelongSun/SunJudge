@@ -366,7 +366,8 @@ export interface MarkdownDocument extends MarkdownDraftSummary {
   item_key: string
 }
 
-export interface LibraryImage { id: string; url: string; filename: string; file_size: number }
+export interface LibraryImage {
+  reviewed_only?: boolean; id: string; url: string; filename: string; file_size: number }
 
 export const api = {
   listLibraryImages: (role: 'teacher' | 'student') => request<{ assets: LibraryImage[] }>(`/api/${role}/images`),

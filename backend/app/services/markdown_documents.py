@@ -75,7 +75,7 @@ def validate_document_images(document: MarkdownDocument, content: str) -> list[s
         owned = asset and (asset.teacher_id == document.owner_id if document.kind == "description" else
                           asset.teacher_id is None and (asset.student_user_id == document.owner_id or
                           (asset.student_user_id is None and asset.document_id == document.id)))
-        if not owned or not asset_path(asset).is_file():
+        if not owned or (not asset.deleted_at and not asset_path(asset).is_file()):
             raise FileValidationError("图片未上传、已丢失或不属于当前文档，请使用“插入图片”重新上传。")
         ids.append(asset.id)
         sizes[asset.id] = asset.file_size
@@ -100,7 +100,7 @@ def create_image(document: MarkdownDocument | None, uploaded: FileStorage, *, te
     raw = uploaded.stream.read(MAX_IMAGE_BYTES + 1)
     if not raw or len(raw) > MAX_IMAGE_BYTES:
         raise FileValidationError("单张图片必须非空且不超过 5 MB。")
-    existing = MarkdownAsset.query.filter_by(**({"teacher_id": teacher_id} if teacher_id else {"student_user_id": student_user_id})).all()
+    existing = MarkdownAsset.query.filter_by(**({"teacher_id": teacher_id} if teacher_id else {"student_user_id": student_user_id})).filter(MarkdownAsset.deleted_at.is_(None)).all()
     count_limit, byte_limit = 1000, (500 if teacher_id else 30) * 1024 * 1024
     if len(existing) >= count_limit or sum(asset.file_size for asset in existing) + len(raw) > byte_limit:
         raise FileValidationError(f"图片数量或容量已达上限（{count_limit} 张 / {byte_limit // 1024 // 1024} MB）。")
@@ -265,3 +265,17 @@ def image_is_referenced(asset: MarkdownAsset) -> bool:
             or any(url in image_sources(content) for assignment in Assignment.query.all() for content in assignment_image_contents(assignment))
             or any(asset.id in (submission.validation_result_json or {}).get("markdown_asset_ids", [])
                    for submission in Submission.query.all()))
+
+
+def retired_image_ids(student_user_id):
+    """Only retire images when every referencing student assignment is reviewed."""
+    reviewed = {g.assignment_id for g in AssignmentGrade.query.filter_by(student_user_id=student_user_id).filter(
+        AssignmentGrade.status.in_([GradingResult.STATUS_REVIEWED, GradingResult.STATUS_PUBLISHED])).all()}
+    eligible, protected = set(), set()
+    for document in MarkdownDocument.query.filter_by(owner_id=student_user_id, kind='submission').all():
+        ids = {match[1] for url in image_sources(document.content) if (match := ASSET_URL.fullmatch(url))}
+        (eligible if document.assignment_id in reviewed else protected).update(ids)
+    for submission in Submission.query.filter_by(student_user_id=student_user_id).all():
+        ids = (submission.validation_result_json or {}).get('markdown_asset_ids', [])
+        (eligible if submission.assignment_id in reviewed else protected).update(ids)
+    return eligible - protected
