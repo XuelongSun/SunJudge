@@ -7,6 +7,7 @@ import ProgressCard from './components/ProgressCard.vue'
 import AssignmentMaterials from './components/AssignmentMaterials.vue'
 import MaterialEditor from './components/MaterialEditor.vue'
 import FilePreviewDialog from './components/FilePreviewDialog.vue'
+import AccountRecoveryDialog from './components/AccountRecoveryDialog.vue'
 import type { CodeTemplate } from './api'
 import { renderContent } from './markdown'
 import MarkdownEditor from './components/MarkdownEditor.vue'
@@ -108,6 +109,18 @@ const rosterLoading = ref(false)
 const assignmentLoading = ref(false)
 const submissionLoading = ref(false)
 const authMode = ref<'login' | 'register'>('login')
+const recoveryDialogVisible = ref(false)
+const emailBindingReminder = ref(false)
+watch(() => currentUser.value?.id, async (id, _previousId, onCleanup) => {
+  let cancelled = false
+  onCleanup(() => { cancelled = true })
+  emailBindingReminder.value = false
+  if (!id) return
+  try {
+    const result = await api.recoveryEmail()
+    if (!cancelled) emailBindingReminder.value = result.enabled && !result.email
+  } catch { /* Account settings displays errors if the user opens it to retry. */ }
+})
 const registerRole = ref<'student' | 'teacher'>('student')
 const theme = ref<'light' | 'dark'>('light')
 
@@ -166,6 +179,9 @@ const studentMarkdownEditor = ref<{ flush: () => Promise<void> }>()
 let teacherEditorSession = 0
 
 const gradeReviewDialogVisible = ref(false)
+const gradeReviewSaving = ref(false)
+let initialGradeReview = ''
+let confirmingGradeReviewClose = false
 const submissionPreviewDialogVisible = ref(false)
 const feedbackPreviewDialogVisible = ref(false)
 const studentFeedbackDialogVisible = ref(false)
@@ -187,11 +203,16 @@ let submissionOpenRequest = 0
 const reviewingSubmission = ref<Submission | null>(null)
 const reviewingSubmissionRow = ref<AssignmentSubmissionRow | null>(null)
 const reviewFileForms = ref<FileReview[]>([])
-const previewingSubmission = ref<Submission | null>(null)
-const submissionPreview = ref<SubmissionPreview | null>(null)
+type PreviewContent = Pick<SubmissionPreview, 'content' | 'previewable' | 'message'>
+type PreviewFile = { filename: string; load: () => Promise<PreviewContent>; download?: () => void }
+const previewingFile = ref<PreviewFile | null>(null)
+const submissionPreview = ref<PreviewContent | null>(null)
 const submissionPreviewError = ref('')
 let submissionPreviewRequest = 0
-watch(submissionPreviewDialogVisible, visible => { if (!visible) submissionPreviewRequest++ })
+watch(submissionPreviewDialogVisible, visible => {
+  if (!visible) submissionPreviewRequest++
+}, { flush: 'sync' })
+watch(gradeReviewDialogVisible, visible => { if (!visible) submissionPreviewDialogVisible.value = false })
 const llmConfig = ref<TeacherLLMConfig | null>(null)
 const scoreManagerCommands = ref('')
 
@@ -886,11 +907,6 @@ function confirmReviewItem(item: FileReview) {
   item.review_status = 'confirmed'
 }
 
-function confirmAllReviewItems() {
-  reviewFileForms.value.forEach((item) => {
-    item.review_status = 'confirmed'
-  })
-}
 function submissionForReviewItem(item: FileReview) {
   return currentReviewSubmissions().find((submission) => submission.id === item.submission_id) ?? null
 }
@@ -898,7 +914,11 @@ function submissionForReviewItem(item: FileReview) {
 function openSubmissionPreviewForReviewItem(item: FileReview) {
   const submission = submissionForReviewItem(item)
   if (submission) {
-    openSubmissionPreview(submission)
+    void openFilePreview({
+      filename: submission.original_filename,
+      load: () => api.previewSubmission(submission.id),
+      download: () => openSubmissionDownload(submission)
+    })
   }
 }
 
@@ -913,10 +933,13 @@ async function rerunCurrentReviewGrading() {
   if (!reviewingSubmissionRow.value || !selectedAssignmentId.value) {
     return
   }
-  await rerunSubmissionGrading(reviewingSubmissionRow.value)
-  const refreshed = [...submissionRows.value, ...testSubmissionRows.value].find((row) => row.roster.id === reviewingSubmissionRow.value?.roster.id)
-  if (refreshed?.submission) {
+  const current = reviewingSubmissionRow.value
+  await rerunSubmissionGrading(current)
+  const refreshed = [...submissionRows.value, ...testSubmissionRows.value].find((row) => row.roster.id === current.roster.id)
+  if (refreshed?.submission && gradeReviewDialogVisible.value && reviewingSubmissionRow.value === current && gradeReviewSnapshot() === initialGradeReview) {
     openGradeReviewDialog(refreshed)
+  } else if (refreshed && gradeReviewDialogVisible.value && reviewingSubmissionRow.value === current) {
+    reviewingSubmissionRow.value = refreshed
   }
 }
 
@@ -1106,6 +1129,7 @@ async function submitLogin() {
   try {
     const { user } = await api.login(loginForm.username, loginForm.password)
     currentUser.value = user
+    loginForm.password = ''
     ElMessage.success('登录成功')
     if (user.role === 'admin') {
       await loadAdminDashboard()
@@ -1147,6 +1171,8 @@ async function logout() {
   submissionOpenRequest++
   submissionOpening.value = false
   await api.logout()
+  recoveryDialogVisible.value = false
+  submissionPreviewDialogVisible.value = false
   materialEditorVisible.value = false
   editingMaterial.value = null
   codeTemplates.value = []
@@ -2087,7 +2113,28 @@ function openGradeReviewDialog(row: AssignmentSubmissionRow) {
   gradeReviewForm.status = grading?.status === 'published' ? 'published' : 'reviewed'
   buildReviewFileForms(row)
   gradeReviewForm.final_score = grading?.final_score ?? reviewTotalScore.value
+  initialGradeReview = gradeReviewSnapshot()
   gradeReviewDialogVisible.value = true
+}
+
+function gradeReviewSnapshot() {
+  return JSON.stringify([gradeReviewForm.teacher_comment, reviewFileForms.value.map(item => [item.score, item.comment, item.review_status])])
+}
+
+async function closeGradeReview(done: () => void) {
+  if (gradeReviewSaving.value || confirmingGradeReviewClose) return
+  if (gradeReviewSnapshot() === initialGradeReview) { done(); return }
+  confirmingGradeReviewClose = true
+  try {
+    await ElMessageBox.confirm('当前评分或评语尚未保存，确定放弃修改并关闭吗？', '批改尚未保存', {
+      confirmButtonText: '放弃并关闭', cancelButtonText: '继续批改', type: 'warning', autofocus: false
+    })
+    done()
+  } catch (error) {
+    if (!isDialogCancel(error)) ElMessage.error((error as Error).message)
+  } finally {
+    confirmingGradeReviewClose = false
+  }
 }
 
 function openStudentFeedbackDialog() {
@@ -2102,22 +2149,22 @@ function openFeedbackPreview() {
 }
 
 async function saveGradeReview(status: GradingStatus = gradeReviewForm.status) {
-  if (!reviewingSubmission.value || !selectedAssignmentId.value) {
+  if (!reviewingSubmission.value || !selectedAssignmentId.value || gradeReviewSaving.value) {
     return
   }
   if (!reviewWeightValid.value) {
     ElMessage.error(`文件评分权重合计应为 100%，当前为 ${reviewWeightTotal.value}%`)
     return
   }
+  gradeReviewSaving.value = true
   try {
-    confirmAllReviewItems()
     gradeReviewForm.final_score = reviewTotalScore.value
     gradeReviewForm.feedback = generatedFeedbackReport()
     await api.reviewSubmissionGrade(reviewingSubmission.value.id, {
       final_score: Number(gradeReviewForm.final_score),
       teacher_comment: gradeReviewForm.teacher_comment,
       status,
-      file_reviews: reviewFilePayloads()
+      file_reviews: reviewFilePayloads().map(item => ({ ...item, review_status: 'confirmed' }))
     })
     ElMessage.success(status === 'published' ? '反馈已发布给学生' : '批改已保存')
     gradeReviewDialogVisible.value = false
@@ -2129,21 +2176,63 @@ async function saveGradeReview(status: GradingStatus = gradeReviewForm.status) {
     }
   } catch (error) {
     ElMessage.error((error as Error).message)
+  } finally {
+    gradeReviewSaving.value = false
   }
 }
 
-async function openSubmissionPreview(submission: Submission) {
+async function openFilePreview(file: PreviewFile) {
   const request = ++submissionPreviewRequest
-  previewingSubmission.value = submission
+  previewingFile.value = file
   submissionPreview.value = null
   submissionPreviewError.value = ''
   submissionPreviewDialogVisible.value = true
   try {
-    const result = await api.previewSubmission(submission.id)
+    const result = await file.load()
     if (request === submissionPreviewRequest && submissionPreviewDialogVisible.value) submissionPreview.value = result
   } catch (error) {
     if (request === submissionPreviewRequest && submissionPreviewDialogVisible.value) submissionPreviewError.value = (error as Error).message
   }
+}
+
+function openStudentWork(assignment: Assignment, requirement: SubmissionRequirement) {
+  const submission = submissionForRequirement(assignment, requirement.key)
+  if (submission) {
+    previewOwnSubmission(assignment, submission)
+    return
+  }
+  if (assignment.markdown_drafts?.[requirement.key]?.has_content) {
+    previewStudentDraft(assignment, requirement.key)
+  }
+}
+
+function previewOwnSubmission(assignment: Assignment, file: NonNullable<Assignment['saved_files']>[number]) {
+  void openFilePreview({
+    filename: file.original_filename,
+    load: () => api.previewOwnSubmission(assignment.id, file.id),
+    download: () => window.open(api.ownSubmissionDownloadUrl(assignment.id, file.id), '_blank', 'noopener')
+  })
+}
+
+function previewStudentMarkdown(filename: string, load: () => string | Promise<string>) {
+  void openFilePreview({ filename, load: async () => ({ content: await load(), previewable: true }) })
+}
+
+function previewStudentDraft(assignment: Assignment, key: string) {
+  const draft = assignment.markdown_drafts?.[key]
+  if (!draft) return
+  previewStudentMarkdown(`${key}-草稿.md`, async () => (await api.readMarkdownDocument(draft.id)).document.content)
+}
+
+function downloadPreviewFile() {
+  if (previewingFile.value?.download) { previewingFile.value.download(); return }
+  if (submissionPreview.value?.content == null || !previewingFile.value) return
+  const url = URL.createObjectURL(new Blob([submissionPreview.value.content], { type: 'text/markdown;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = previewingFile.value.filename
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 async function openLLMConfigDialog() {
@@ -2345,10 +2434,15 @@ onMounted(() => {
           </div>
         </div>
         <el-button v-if="isTeacher" :icon="Files" @click="openLLMConfigDialog">LLM 配置</el-button>
+        <el-button v-if="currentUser" @click="recoveryDialogVisible = true">找回邮箱</el-button>
         <el-button :icon="theme === 'light' ? Moon : Sunny" circle title="切换主题" @click="toggleTheme" />
         <el-button v-if="currentUser" :icon="SwitchButton" @click="logout">退出</el-button>
       </div>
     </section>
+
+    <el-alert v-if="currentUser && emailBindingReminder" title="绑定找回邮箱，方便忘记密码时自助恢复账号" type="warning" :closable="false" show-icon class="recovery-binding-reminder">
+      <el-button type="primary" size="small" @click="recoveryDialogVisible = true">立即绑定</el-button>
+    </el-alert>
 
     <section v-if="!currentUser" class="auth-panel">
       <el-tabs v-model="authMode" stretch>
@@ -2361,6 +2455,7 @@ onMounted(() => {
               <el-input v-model="loginForm.password" type="password" autocomplete="current-password" show-password />
             </el-form-item>
             <el-button class="primary-action" type="primary" native-type="submit" :loading="loading">登录</el-button>
+            <el-button link type="primary" @click="recoveryDialogVisible = true">忘记密码？</el-button>
           </el-form>
         </el-tab-pane>
 
@@ -2632,6 +2727,11 @@ onMounted(() => {
                     {{ row.allowed_extensions.includes('.md') ? '在线编辑' : submissionActionLabel(selectedStudentAssignment, row.key) }}
                   </el-button>
                   <el-button v-if="row.allowed_extensions.includes('.md')" :icon="Upload" :loading="submissionOpening" :disabled="submissionOpening || selectedStudentAssignment.assignment_grade?.status === 'published'" @click="openSubmissionDialog(selectedStudentAssignment, row, true)">上传文件</el-button>
+                </template>
+              </el-table-column>
+              <el-table-column label="查看" width="150" fixed="right" align="center">
+                <template #default="{ row }">
+                  <el-button type="success" :icon="View" :disabled="!submissionForRequirement(selectedStudentAssignment, row.key) && !selectedStudentAssignment.markdown_drafts?.[row.key]?.has_content" @click="openStudentWork(selectedStudentAssignment, row)">查看作业</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -3007,8 +3107,10 @@ onMounted(() => {
         <el-button type="primary" :icon="Check" :disabled="submissionLoading" @click="copyScoreManagerCommands">复制全部命令</el-button>
       </template>
     </el-dialog>
-    <el-dialog v-model="gradeReviewDialogVisible" title="作业批改" width="min(1120px, 96vw)" class="grade-review-dialog">
-      <el-form label-position="top" @submit.prevent>
+    <el-dialog v-model="gradeReviewDialogVisible" title="作业批改" width="min(1120px, 96vw)" class="grade-review-dialog" :before-close="closeGradeReview">
+      <div class="grade-review-layout">
+      <div id="grade-review-preview" class="grade-review-preview" />
+      <el-form label-position="top" :disabled="gradeReviewSaving" @submit.prevent>
         <section v-if="reviewingSubmission" class="grade-review-sticky-header">
           <div>
             <span>序号</span>
@@ -3169,16 +3271,19 @@ onMounted(() => {
           </div>
         </section>
       </el-form>
+      </div>
       <template #footer>
-        <el-button @click="gradeReviewDialogVisible = false">取消</el-button>
-        <el-button type="warning" :icon="Refresh" @click="returnCurrentSubmissionForResubmit">退回重交</el-button>
-        <el-button :icon="View" @click="openFeedbackPreview">预览反馈</el-button>
-        <el-button :icon="Check" @click="saveGradeReview('reviewed')">保存</el-button>
-        <el-button type="primary" :icon="DocumentAdd" @click="saveGradeReview('published')">发布反馈</el-button>
+        <el-button :disabled="gradeReviewSaving" @click="closeGradeReview(() => { gradeReviewDialogVisible = false })">取消</el-button>
+        <el-button type="warning" :icon="Refresh" :disabled="gradeReviewSaving" @click="returnCurrentSubmissionForResubmit">退回重交</el-button>
+        <el-button :icon="View" :disabled="gradeReviewSaving" @click="openFeedbackPreview">预览反馈</el-button>
+        <el-button :icon="Check" :disabled="gradeReviewSaving" @click="saveGradeReview('reviewed')">保存</el-button>
+        <el-button type="primary" :icon="DocumentAdd" :disabled="gradeReviewSaving" @click="saveGradeReview('published')">发布反馈</el-button>
       </template>
     </el-dialog>
 
-    <FilePreviewDialog v-model="submissionPreviewDialogVisible" :filename="previewingSubmission?.original_filename ?? ''" :content="submissionPreview?.content" :loading="!submissionPreview && !submissionPreviewError" :error="submissionPreviewError" :previewable="submissionPreview?.previewable ?? false" :message="submissionPreview?.message" @retry="previewingSubmission && openSubmissionPreview(previewingSubmission)" @download="previewingSubmission && openSubmissionDownload(previewingSubmission)" />
+    <AccountRecoveryDialog v-model="recoveryDialogVisible" :mode="currentUser ? 'bind' : 'reset'" @bound="emailBindingReminder = false" @reset="loginForm.password = ''" />
+
+    <FilePreviewDialog v-model="submissionPreviewDialogVisible" :filename="previewingFile?.filename ?? ''" :content="submissionPreview?.content" :loading="!submissionPreview && !submissionPreviewError" :error="submissionPreviewError" :previewable="submissionPreview?.previewable ?? false" :message="submissionPreview?.message" :dock-target="gradeReviewDialogVisible ? '#grade-review-preview' : undefined" :downloadable="Boolean(previewingFile?.download || submissionPreview?.content != null)" @retry="previewingFile && openFilePreview(previewingFile)" @download="downloadPreviewFile" />
 
     <el-dialog v-model="feedbackPreviewDialogVisible" title="反馈报告预览" width="min(960px, 94vw)">
       <div class="assignment-rendered" v-html="renderContent(generatedFeedbackReport(), 'markdown')" />

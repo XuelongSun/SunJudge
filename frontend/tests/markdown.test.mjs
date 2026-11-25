@@ -66,6 +66,58 @@ test('escaped dollars, link destinations and old placeholder text are not turned
   assert.equal((html.match(/class="katex"/g) ?? []).length, 1)
 })
 
+test('LaTeX parentheses render inline alongside dollar math in all Markdown previews', () => {
+  const source = String.raw`公式 \(\frac{a}{b} + x^2\)，以及 $y^2$。`
+  for (const html of [renderContent(source, 'markdown'), renderFilePreview(source, 'report.md')]) {
+    assert.equal((html.match(/class="katex"/g) ?? []).length, 2)
+    assert.match(html, /<mfrac>/)
+    assert.doesNotMatch(html, /katex-display|katex-error/)
+  }
+  const multiLine = renderContent('推导 \\(\\frac{a}{b}\n+x^2\\) 完成。', 'markdown')
+  assert.equal((multiLine.match(/class="katex"/g) ?? []).length, 1)
+  assert.doesNotMatch(multiLine, /katex-display|katex-error/)
+})
+
+test('LaTeX brackets render same-line, multi-line and nested display equations', () => {
+  const sources = [String.raw`\[x^2 + y^2\]`,
+    '\\[\n\\begin{aligned}\na &= 1 \\\\\nb &= 2\n\\end{aligned}\n\\]',
+    '> \\[\n> x^2\n> \\]', '- 公式\n\n  \\[\n  x^2\n  \\]',
+    String.raw`推导 \[x^2 + y^2\] 结束。`, '推导 \\[\nx^2\n\\] 结束。',
+    '段落\n\\[\nx^2\n\\]\n后续段落']
+  for (const source of sources) {
+    const html = renderContent(source, 'markdown')
+    assert.equal((html.match(/class="katex-display"/g) ?? []).length, 1, source)
+    assert.doesNotMatch(html, /katex-error/, source)
+  }
+  const multiple = renderContent(String.raw`\[x^2\] 以及 \[y^2\]`, 'markdown')
+  assert.equal((multiple.match(/class="katex-display"/g) ?? []).length, 2)
+  assert.doesNotMatch(multiple, /katex-error/)
+})
+
+test('LaTeX delimiters in code, escaped text and link destinations stay literal', () => {
+  const latex = String.raw`\(x^2\) \[y^2\]`
+  for (const source of [`\`${latex}\``, `\`\`\`latex\n${latex}\n\`\`\``, `    ${latex}`,
+    `> \`\`\`latex\n> ${latex}\n> \`\`\``, `- 示例\n\n  \`\`\`\n  ${latex}\n  \`\`\``,
+    String.raw`\\(x^2\\) \\[y^2\\]`,
+    String.raw`[链接](/files/\(x\)/\[y\])`, String.raw`![图片](/files/\(x\).png)`]) {
+    assert.doesNotMatch(renderContent(source, 'markdown'), /katex/, source)
+  }
+  const escaped = renderContent(String.raw`\\(literal\\) and \(x^2\)`, 'markdown')
+  assert.equal((escaped.match(/class="katex"/g) ?? []).length, 1)
+  assert.match(escaped, /\\\(literal\\\)/)
+  assert.doesNotMatch(renderFilePreview(latex, 'source.py'), /katex/)
+})
+
+test('unclosed, mismatched and empty LaTeX delimiters do not consume surrounding content', () => {
+  for (const source of [String.raw`\(x^2`, String.raw`\[x^2`, String.raw`\(x^2\]`, String.raw`\[x^2\)`,
+    '\\[\nx^2\n\\\\]', String.raw`\(\)`, String.raw`\[\]`]) {
+    assert.doesNotMatch(renderContent(source, 'markdown'), /katex/, source)
+  }
+  const html = renderContent('\\[unclosed\n\n# 后续标题\n\n正常 **正文**', 'markdown')
+  assert.match(html, /<h1>后续标题<\/h1>/)
+  assert.match(html, /<strong>正文<\/strong>/)
+})
+
 test('deadline input, saved UTC time and Markdown preview round trip in Shanghai time', () => {
   const input = '2030-10-11T23:59:00'
   const payload = deadlineFromInput(input)

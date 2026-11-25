@@ -621,6 +621,10 @@ def preview_submission_file(submission_id: int):
     submission = _get_managed_submission_or_404(submission_id)
     if not submission:
         return jsonify({"message": "Submission not found or not manageable."}), HTTPStatus.NOT_FOUND
+    return _preview_submission(submission, include_private=True)
+
+
+def _preview_submission(submission: Submission, *, include_private: bool = False):
     target, error = _submission_file_path(submission)
     if error:
         return jsonify({"message": error}), HTTPStatus.NOT_FOUND
@@ -628,14 +632,14 @@ def preview_submission_file(submission_id: int):
     if extension not in {".py", ".md"}:
         return jsonify(
             {
-                "submission": submission.to_dict(include_private=True),
+                "submission": submission.to_dict(include_private=include_private),
                 "previewable": False,
                 "content": None,
                 "message": "Only .py and .md submissions are previewed inline in M3.",
             }
         )
-    content = target.read_text(encoding="utf-8", errors="replace")
-    return jsonify({"submission": submission.to_dict(include_private=True), "previewable": True, "content": content})
+    content = target.read_bytes().decode("utf-8", errors="replace")
+    return jsonify({"submission": submission.to_dict(include_private=include_private), "previewable": True, "content": content})
 
 
 @assignments_bp.get("/admin/submissions/<int:submission_id>/download")
@@ -645,6 +649,10 @@ def download_submission_file(submission_id: int):
     submission = _get_managed_submission_or_404(submission_id)
     if not submission:
         return jsonify({"message": "Submission not found or not manageable."}), HTTPStatus.NOT_FOUND
+    return _download_submission(submission)
+
+
+def _download_submission(submission: Submission):
     target, error = _submission_file_path(submission)
     if error:
         return jsonify({"message": error}), HTTPStatus.NOT_FOUND
@@ -796,6 +804,23 @@ def mark_assignment_read(assignment_id: int):
         db.session.add(read)
         db.session.commit()
     return jsonify({"read": read.to_dict(), "assignment": assignment.to_dict(student_user_id=current_user.id)})
+
+
+@assignments_bp.get("/assignments/<int:assignment_id>/submissions/<int:submission_id>/preview")
+@assignments_bp.get("/assignments/<int:assignment_id>/submissions/<int:submission_id>/download", defaults={"download": True})
+@login_required
+@roles_required(User.ROLE_STUDENT)
+def read_own_submission(assignment_id: int, submission_id: int, download: bool = False):
+    assignment = _get_student_assignment_or_404(assignment_id)
+    submission = Submission.query.filter_by(
+        id=submission_id, assignment_id=assignment_id, student_user_id=current_user.id,
+    ).first() if assignment else None
+    if not submission:
+        return jsonify(message="找不到此作业文件。"), HTTPStatus.NOT_FOUND
+    response = _download_submission(submission) if download else _preview_submission(submission)
+    if isinstance(response, Response):
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 @assignments_bp.post("/assignments/<int:assignment_id>/submissions")

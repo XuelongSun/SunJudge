@@ -9,6 +9,39 @@ from app.models import Assignment, AssignmentRead, CourseClass, Submission, utc_
 from test_assignments import _create_class_with_student
 
 
+def test_short_code_attempt_migration_preserves_existing_recovery_records(tmp_path):
+    from app.models import AccountRecovery, User
+
+    class MigrationConfig(TestingConfig):
+        SQLALCHEMY_DATABASE_URI = f"sqlite:///{tmp_path / 'recovery.sqlite'}"
+
+    app = create_app(MigrationConfig)
+    runner = app.test_cli_runner()
+    result = runner.invoke(args=["db", "upgrade", "e5205c637aa"])
+    assert result.exit_code == 0, result.output
+    with app.app_context():
+        user = User(username="legacy-teacher", role="teacher")
+        user.set_password("old-password")
+        db.session.add(user)
+        db.session.flush()
+        user_id = user.id
+        db.session.execute(text("""INSERT INTO account_recoveries
+            (user_id, email, pending_email, binding_digest, reset_digest)
+            VALUES (:user_id, 'old@example.test', 'pending@example.test', :digest, :digest)"""),
+            {"user_id": user_id, "digest": "a" * 64})
+        db.session.commit()
+    for args in (["db", "upgrade"], ["db", "check"]):
+        result = runner.invoke(args=args)
+        assert result.exit_code == 0, result.output
+    with app.app_context():
+        recovery = db.session.get(AccountRecovery, user_id)
+        assert recovery.email == "old@example.test" and recovery.pending_email == "pending@example.test"
+        assert recovery.binding_digest == recovery.reset_digest == "a" * 64
+        assert recovery.binding_attempts == recovery.reset_attempts == 0
+        db.session.remove()
+        db.engine.dispose()
+
+
 def test_teacher_library_migration_preserves_and_backfills_old_assets(tmp_path):
     class MigrationConfig(TestingConfig):
         SQLALCHEMY_DATABASE_URI = f"sqlite:///{tmp_path / 'library.sqlite'}"

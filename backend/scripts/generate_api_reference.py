@@ -35,8 +35,10 @@ def generate() -> str:
                     owner = ast.unparse(node.func.value)
                     if owner.endswith("payload") or owner in {"request.args", "request.form", "request.files"}:
                         fields.add(f"{owner}.{node.args[0].value}")
-                if isinstance(node.func, ast.Name) and node.func.id == "jsonify" and node.args and isinstance(node.args[0], ast.Dict):
-                    responses.update(key.value for key in node.args[0].keys if isinstance(key, ast.Constant) and isinstance(key.value, str))
+                if isinstance(node.func, ast.Name) and node.func.id == "jsonify":
+                    if node.args and isinstance(node.args[0], ast.Dict):
+                        responses.update(key.value for key in node.args[0].keys if isinstance(key, ast.Constant) and isinstance(key.value, str))
+                    responses.update(keyword.arg for keyword in node.keywords if keyword.arg)
             for method, route in routes:
                 role = ", ".join(roles) or ("登录用户" if authenticated else "公开")
                 source = f"[{fn.name}](../backend/app/routes/{module}.py#L{fn.lineno})"

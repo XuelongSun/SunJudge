@@ -1,8 +1,59 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from io import BytesIO
 
 from app.extensions import db
-from app.models import Assignment, AssignmentGrade, MarkdownAsset
+from app.models import Assignment, AssignmentGrade, CourseMember, MarkdownAsset, utc_now
 from test_markdown_documents import context, login, open_draft, save, upload_image
+
+
+def test_read_only_student_work_survives_deadline_and_feedback(client, context):
+    assignment_id = context["assignment_id"]
+    url = f"/api/assignments/{assignment_id}"
+    list_url = f"/api/classes/{context['class_id']}/assignments"
+    login(client, "OS202601-06")
+    document = open_draft(client, context)
+    asset = upload_image(client, document)
+    original = f"# 已确认报告\n![配图]({asset['url']})"
+    document = save(client, document, original)
+    confirmed = client.post(f"{url}/confirm-submission").json["assignment"]["saved_files"][0]
+    raw_upload = b'# Uploaded\r\n\r\n<tag>\r\n'
+    result = client.post(f"{url}/submissions", data={"item_key": "report", "file": (BytesIO(raw_upload), "OS202601-06_r1.md")})
+    assert result.status_code == 201
+    upload_id = result.json["submission"]["id"]
+    document = client.get(f"/api/markdown-documents/{document['id']}").json["document"]
+    save(client, document, "# 尚未确认的在线草稿")
+    assignment = db.session.get(Assignment, assignment_id)
+    assignment.deadline = utc_now() - timedelta(days=1)
+    db.session.commit()
+    preview_url = f"{url}/submissions/{confirmed['id']}/preview"
+    assert client.get(preview_url).json["content"] == original
+    assert client.post(f"{url}/confirm-submission").status_code == 403
+    grade = AssignmentGrade.query.filter_by(assignment_id=assignment_id, student_user_id=context["student_id"]).one()
+    grade.status = "published"
+    db.session.commit()
+
+    files = client.get(list_url).json["assignments"][0]["saved_files"]
+    assert {file["id"]: file["status"] for file in files} == {confirmed["id"]: "submitted", upload_id: "uploaded"}
+    response = client.get(preview_url)
+    assert response.status_code == 200 and response.json["content"] == original
+    assert response.headers["Cache-Control"] == "private, no-store"
+    assert client.get(asset["url"]).status_code == 200
+    assert client.get(f"{url}/submissions/{upload_id}/preview").json["content"] == raw_upload.decode()
+    assert client.get(f"{url}/submissions/{upload_id}/download").data == raw_upload
+    assert client.get(f"/api/markdown-documents/{document['id']}").json["document"]["content"] == "# 尚未确认的在线草稿"
+    assert client.post(f"{url}/confirm-submission").status_code == 403
+
+    login(client, "outsider")
+    assert client.get(preview_url).status_code == 404
+    db.session.add(CourseMember(course_id=assignment.course_id, class_id=assignment.class_id,
+                                user_id=context["outsider_id"], role="student"))
+    db.session.commit()
+    assert client.get(preview_url).status_code == 404
+    login(client, "OS202601-06")
+    assert client.get(f"/api/assignments/{assignment_id + 1}/submissions/{upload_id}/download").status_code == 404
+    assignment.status = "draft"
+    db.session.commit()
+    assert client.get(preview_url).status_code == 404
 
 
 def test_deadline_has_explicit_utc_and_submission_gate_uses_same_instant(client, context, monkeypatch):

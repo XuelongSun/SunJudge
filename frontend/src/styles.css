@@ -108,8 +108,21 @@ body {
 
 .attachment-actions { flex-wrap: nowrap; }
 .attachment-actions > .el-button { flex-shrink: 0; }
-.file-preview-actions { justify-content: flex-end; }
+.file-preview-actions { justify-content: flex-end; flex-wrap: wrap; }
 .file-preview-content { overflow-wrap: anywhere; }
+.recovery-code-controls {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+}
+.recovery-code-controls > .el-input { min-width: 0; }
+.recovery-binding-reminder { margin-bottom: 16px; }
+.file-preview-source {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .el-dialog.file-preview-dialog {
   padding: 0;
@@ -139,19 +152,70 @@ body {
 .file-preview-dialog .el-dialog__headerbtn:hover .el-dialog__close { color: var(--accent); }
 
 .file-preview-dialog > .el-dialog__body {
-  padding: 20px 24px;
+  padding: 0;
   background: var(--panel-bg);
 }
 
-.file-preview-dialog > .el-dialog__footer {
+.file-preview-mode { padding: 12px 24px 0; }
+.file-preview-body {
+  padding: 20px 24px;
+  max-height: 60dvh;
+  overflow: auto;
+}
+
+.file-preview-dialog .file-preview-actions {
   padding: 14px 24px;
   border-top: 1px solid var(--role-teacher-border);
   background: var(--role-teacher-bg);
 }
 
 @media (max-width: 480px) {
-  .file-preview-dialog > .el-dialog__footer { padding: 14px 12px; }
+  .file-preview-dialog .file-preview-actions { padding: 14px 12px; }
   .file-preview-actions > .el-button { padding: 8px 10px; }
+}
+
+.grade-review-layout:has(.grade-review-preview > aside) {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-areas: 'form preview';
+  gap: 16px;
+}
+.grade-review-preview:empty { display: none; }
+.grade-review-preview {
+  grid-area: preview;
+  order: 1;
+  align-self: start;
+  position: sticky;
+  top: 12px;
+  min-width: 0;
+}
+.grade-review-preview > aside {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel-bg);
+}
+.file-preview-dock-title {
+  display: block;
+  padding: 12px;
+  overflow-wrap: anywhere;
+  background: var(--role-teacher-bg);
+}
+.grade-review-preview .file-preview-body { max-height: 48dvh; padding: 12px; }
+.grade-review-preview .file-preview-actions { padding: 8px; justify-content: flex-start; }
+.grade-review-preview .file-preview-actions > .el-button { padding-inline: 8px; }
+.grade-review-layout > form { min-width: 0; }
+
+@media (max-width: 820px) {
+  .grade-review-layout:has(.grade-review-preview > aside) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'preview' 'form';
+    max-height: 64dvh;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .grade-review-layout:has(.grade-review-preview > aside) > form { overflow: auto; }
+  .grade-review-preview { position: static; }
+  .grade-review-preview .file-preview-body { max-height: 23dvh; }
 }
 
 .toolbar-band,

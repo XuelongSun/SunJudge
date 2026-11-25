@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title_zh }} · SunJudge</title>
+  <style>
+    @media only screen and (max-width: 480px) {
+      .email-outer { padding: 16px 10px !important; }
+      .email-content { padding: 26px 22px !important; }
+      .email-header { padding: 22px !important; }
+      .email-code { font-size: 32px !important; letter-spacing: 7px !important; padding-left: 7px !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#f6f8fa;color:#1f2328;font-family:Inter,'Segoe UI','Microsoft YaHei',Arial,sans-serif;-webkit-text-size-adjust:100%;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">{{ title_zh }} / {{ title_en }} · {{ valid_minutes }} 分钟内有效 / Valid for {{ valid_minutes }} minutes</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f6f8fa;">
+    <tr><td align="center" class="email-outer" style="padding:36px 18px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #d0d7de;border-radius:8px;overflow:hidden;">
+        <tr><td style="height:5px;background-color:#0969da;font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr><td class="email-header" style="padding:25px 36px;background-color:#ddf4ff;border-bottom:1px solid #b6e3ff;">
+          <p style="margin:0;color:#0969da;font-size:27px;font-weight:750;letter-spacing:-0.6px;">SunJudge</p>
+        </td></tr>
+        <tr><td class="email-content" style="padding:32px 36px;">
+          <h1 style="margin:0 0 4px;font-size:24px;line-height:1.4;font-weight:700;">{{ title_zh }}</h1>
+          <p lang="en" style="margin:0 0 20px;color:#59636e;font-size:14px;line-height:1.5;">{{ title_en }}</p>
+          <p style="margin:0 0 10px;font-size:14px;line-height:1.7;overflow-wrap:anywhere;">你好，{{ recipient_name }} / Hi, {{ recipient_name }} 👋</p>
+          <p style="margin:0;color:#1f2328;font-size:14px;line-height:1.8;">{{ intro_zh }}</p>
+          <p lang="en" style="margin:3px 0 20px;color:#59636e;font-size:13px;line-height:1.7;">{{ intro_en }}</p>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f1f7ff;border:1px solid #b6d7ff;border-radius:8px;">
+            <tr><td align="center" style="padding:19px 12px 21px;">
+              <p style="margin:0 0 10px;color:#0550ae;font-size:12px;font-weight:600;">验证码 / Code</p>
+              <div class="email-code" dir="ltr" style="color:#0969da;font-family:'Courier New',monospace;font-size:40px;font-weight:700;line-height:1.3;letter-spacing:10px;padding-left:10px;white-space:nowrap;">{{ code }}</div>
+              <p style="margin:11px 0 0;color:#0550ae;font-size:12px;line-height:1.7;">{{ valid_minutes }} 分钟有效 · 仅可使用一次<br><span lang="en">Valid for {{ valid_minutes }} minutes · Single use</span></p>
+            </td></tr>
+          </table>
+          <p style="margin:20px 0 0;color:#59636e;font-size:12px;line-height:1.8;">请勿泄露验证码，非本人操作请忽略。</p>
+          <p lang="en" style="margin:3px 0 0;color:#59636e;font-size:12px;line-height:1.7;">Keep this code private. If you didn't request this, ignore this email.</p>
+        </td></tr>
+        <tr><td class="email-header" style="padding:20px 36px;border-top:1px solid #d0d7de;background-color:#f6f8fa;">
+          <p style="margin:0;font-size:13px;line-height:1.8;font-weight:600;">Sunjudge</p>
+          <p style="margin:4px 0 0;color:#59636e;font-size:12px;line-height:1.7;">{{ date_label }}</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

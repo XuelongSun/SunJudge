@@ -32,6 +32,12 @@ class Config:
     GRADING_QUEUE_INLINE = os.getenv("GRADING_QUEUE_INLINE", "false").lower() in {"1", "true", "yes"}
     LLM_GRADING_TIMEOUT = int(os.getenv("LLM_GRADING_TIMEOUT", "60"))
     LLM_ENCRYPTION_KEY = os.getenv("LLM_ENCRYPTION_KEY", "")
+    SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_SECURITY = os.getenv("SMTP_SECURITY", "starttls").strip().lower()
+    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
 
 
 class TestingConfig(Config):

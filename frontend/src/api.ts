@@ -1,5 +1,11 @@
 export type Role = 'student' | 'teacher' | 'admin'
 
+export interface PasswordRecoveryRequest {
+  email: string
+  role: Role
+  identifier: string
+}
+
 export type TeacherStatus = 'none' | 'pending' | 'approved' | 'rejected'
 
 export interface User {
@@ -259,6 +265,7 @@ export interface Assignment {
   latest_submission_count?: number
   submission?: Submission | null
   submissions?: Submission[]
+  saved_files?: Array<Pick<Submission, 'id' | 'original_filename' | 'status'>>
   assignment_grade?: GradingResult | null
 }
 
@@ -383,6 +390,7 @@ export const api = {
     request<{ student_count: number }>('/api/admin/classes/import-excel', { method: 'POST', body: formData }),
   openMarkdownDocument: (payload: { class_id: number; assignment_id?: number; kind: 'description' | 'submission'; item_key?: string }) =>
     request<{ document: MarkdownDocument }>('/api/markdown-documents', { method: 'POST', body: JSON.stringify(payload) }),
+  readMarkdownDocument: (id: number) => request<{ document: MarkdownDocument }>(`/api/markdown-documents/${id}`),
   saveMarkdownDocument: (id: number, content: string, revision: number) =>
     request<{ document: MarkdownDocument }>(`/api/markdown-documents/${id}`, { method: 'PUT', body: JSON.stringify({ content, revision }) }),
   uploadMarkdownImage: (id: number, file: File) => {
@@ -402,6 +410,15 @@ export const api = {
       body: JSON.stringify({ username, password })
     }),
   logout: () => request<{ message: string }>('/api/auth/logout', { method: 'POST' }),
+  recoveryEmail: () => request<{ email: string | null; enabled: boolean }>('/api/auth/recovery/email'),
+  requestEmailBinding: (email: string, password: string) =>
+    request<{ message: string }>('/api/auth/recovery/email/request', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  confirmEmailBinding: (email: string, code: string) =>
+    request<{ email: string; message: string }>('/api/auth/recovery/email/confirm', { method: 'POST', body: JSON.stringify({ email, code }) }),
+  requestPasswordReset: (payload: PasswordRecoveryRequest) =>
+    request<{ message: string }>('/api/auth/recovery/password/request', { method: 'POST', body: JSON.stringify(payload) }),
+  confirmPasswordReset: (payload: PasswordRecoveryRequest & { code: string; password: string }) =>
+    request<{ message: string }>('/api/auth/recovery/password/confirm', { method: 'POST', body: JSON.stringify(payload) }),
   listPublicClasses: () => request<{ classes: PublicClass[] }>('/api/classes/public'),
   listMyClasses: () => request<{ classes: PublicClass[] }>('/api/classes/my'),
   listTeachers: (status = 'pending') => request<{ teachers: User[] }>(`/api/admin/teachers?status=${status}`),
@@ -518,6 +535,9 @@ export const api = {
   getLLMConfig: () => request<{ config: TeacherLLMConfig | null }>('/api/admin/llm-config'),
   submissionDownloadUrl: (submissionId: number) => `/api/admin/submissions/${submissionId}/download`,
   previewSubmission: (submissionId: number) => request<SubmissionPreview>(`/api/admin/submissions/${submissionId}/preview`),
+  ownSubmissionDownloadUrl: (assignmentId: number, submissionId: number) => `/api/assignments/${assignmentId}/submissions/${submissionId}/download`,
+  previewOwnSubmission: (assignmentId: number, submissionId: number) =>
+    request<SubmissionPreview>(`/api/assignments/${assignmentId}/submissions/${submissionId}/preview`),
   saveLLMConfig: (payload: { provider?: string; base_url: string; model: string; api_key?: string; enabled: boolean }) =>
     request<{ config: TeacherLLMConfig }>('/api/admin/llm-config', {
       method: 'PUT',

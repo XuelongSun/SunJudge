@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from hashlib import sha256
 
 from flask_login import UserMixin
 from sqlalchemy import func, inspect
@@ -48,6 +49,10 @@ class User(UserMixin, db.Model):
     def check_password(self, password: str) -> bool:
         return check_password_hash(self.password_hash, password)
 
+    def get_id(self) -> str:
+        version = sha256(self.password_hash.encode()).hexdigest()
+        return f"{self.id}:{version}"
+
     @property
     def is_teacher_approved(self) -> bool:
         return self.role == self.ROLE_TEACHER and self.teacher_status == self.TEACHER_STATUS_APPROVED
@@ -64,6 +69,21 @@ class User(UserMixin, db.Model):
             "teacher_status": self.teacher_status,
             "created_at": utc_iso(self.created_at),
         }
+
+
+class AccountRecovery(db.Model):
+    __tablename__ = "account_recoveries"
+
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    email = db.Column(db.String(254), unique=True)
+    pending_email = db.Column(db.String(254))
+    binding_digest = db.Column(db.String(64))
+    binding_expires_at = db.Column(db.DateTime)
+    binding_attempts = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    reset_digest = db.Column(db.String(64))
+    reset_expires_at = db.Column(db.DateTime)
+    reset_attempts = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    password_reset_at = db.Column(db.DateTime)
 
 
 class Course(db.Model):
@@ -289,6 +309,7 @@ class Assignment(db.Model):
             latest = self.latest_submission_for(student_user_id)
             data["submission"] = latest.to_dict() if latest else None
             data["submissions"] = [submission.to_dict() for submission in self.latest_submissions_for(student_user_id)]
+            data["saved_files"] = self.saved_files_for(student_user_id)
             assignment_grade = AssignmentGrade.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()
             data["assignment_grade"] = assignment_grade.to_public_dict() if assignment_grade else None
             from .services.student_assignment_state import student_deadline_state
@@ -302,6 +323,17 @@ class Assignment(db.Model):
         if submission_item_key is not None:
             query = query.filter(Submission.submission_item_key == submission_item_key)
         return query.order_by(Submission.submitted_at.desc(), Submission.id.desc()).first()
+
+    def saved_files_for(self, student_user_id: int) -> list[dict[str, object]]:
+        rows = Submission.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).order_by(
+            Submission.submitted_at.desc(), Submission.id.desc()
+        ).all()
+        latest = {}
+        for row in rows:
+            # Keep the confirmed snapshot available when a newer upload is waiting for confirmation.
+            latest.setdefault((row.submission_item_key, row.status != Submission.STATUS_UPLOADED), row)
+        return [{"id": row.id, "original_filename": row.original_filename, "status": row.status}
+                for row in latest.values()]
 
     def latest_submissions_for(self, student_user_id: int) -> list["Submission"]:
         override = AssignmentStudentOverride.query.filter_by(assignment_id=self.id, student_user_id=student_user_id).first()

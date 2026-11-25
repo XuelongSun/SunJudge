@@ -9,13 +9,14 @@ from flask_cors import CORS
 
 from .config import Config
 from .extensions import db, login_manager, migrate
-from .models import TeacherLLMConfig, User
+from .models import AccountRecovery, TeacherLLMConfig, User
 from .routes.admin import admin_bp
 from .routes.assignments import assignments_bp
 from .routes.auth import auth_bp
 from .routes.classes import classes_bp
 from .routes.markdown_documents import markdown_bp
 from .services.grading_queue import init_grading_queue
+from .services.account_recovery import operator_reset_password
 from .services.secrets import PREFIX, encrypt_api_key
 
 
@@ -67,7 +68,17 @@ def register_origin_guard(app: Flask) -> None:
 
 @login_manager.user_loader
 def load_user(user_id: str) -> User | None:
-    return db.session.get(User, int(user_id))
+    raw_id, separator, _ = user_id.partition(":")
+    if not raw_id.isdecimal():
+        return None
+    user = db.session.get(User, int(raw_id))
+    if not user:
+        return None
+    if separator:
+        return user if user.get_id() == user_id else None
+    # Cookies issued before the upgrade carry only the numeric ID.
+    recovery = db.session.get(AccountRecovery, user.id)
+    return user if not recovery or not recovery.password_reset_at else None
 
 
 @login_manager.unauthorized_handler
@@ -90,6 +101,20 @@ def register_error_handlers(app: Flask) -> None:
 
 
 def register_cli(app: Flask) -> None:
+    @app.cli.command("reset-password")
+    @click.argument("identifier")
+    @click.option("--role", type=click.Choice([User.ROLE_STUDENT, User.ROLE_TEACHER, User.ROLE_ADMIN]), required=True)
+    def reset_password_command(identifier: str, role: str) -> None:
+        """核实身份后重置账号密码；学生使用任一已绑定的学生编号。"""
+        password = click.prompt("新密码", hide_input=True, confirmation_prompt=True)
+        if not 6 <= len(password) <= 1024:
+            raise click.ClickException("新密码长度须为 6 至 1024 个字符。")
+        try:
+            user = operator_reset_password(role, identifier.strip(), password)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"已重置账号 ID {user.id} 的密码，请用户登录后绑定找回邮箱。")
+
     @app.cli.command("cleanup-markdown-assets")
     @click.option("--days", default=7, type=click.IntRange(min=1), help="Only consider unused images older than this many days.")
     @click.option("--apply", is_flag=True, help="Delete candidates; otherwise only report a count.")

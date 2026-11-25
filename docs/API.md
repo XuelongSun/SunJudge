@@ -18,6 +18,22 @@
 
 `POST /auth/login`：`{username,password}`，成功 200 `{user}`；学生 username 为真实姓名或任一绑定编号。教师审批未通过返回 403；同名同密码账号冲突返回 409。`POST /auth/logout` 返回 `{message}`；`GET /auth/me` 未登录也返回 200 `{user:null}`。
 
+找回邮箱和重置密码接口使用下列路径，均在 `/api` 下。验证码 15 分钟内有效且只能使用一次。
+
+新验证码为 6 位字母数字混合，字母大小写不敏感。每份验证码最多验证 5 次，次数耗尽后需重新申请；发送间隔至少 1 分钟。升级前已发出的 32 位验证码在原有效期内仍可使用，保持原大小写。
+
+| 方法和路径 | 权限及请求 | 成功响应 |
+| --- | --- | --- |
+| `GET /auth/recovery/email` | 登录用户 | 200 `{email,enabled}` |
+| `POST /auth/recovery/email/request` | 登录用户，`{email,password}` 中的密码为当前密码 | 202 `{message}` |
+| `POST /auth/recovery/email/confirm` | 登录用户，`{email,code}` | 200 `{email,message}` |
+| `POST /auth/recovery/password/request` | 公开，`{role,identifier,email}`；学生 `identifier` 为真实姓名，教师/管理员为用户名 | 202 `{message}`，身份和邮箱不匹配时返回相同提示 |
+| `POST /auth/recovery/password/confirm` | 公开，`{role,identifier,email,code,password}` 中的密码为新密码 | 200 `{message}`，重新校验身份和已绑定邮箱，密码更新后旧会话失效 |
+
+`role` 必须为 `student`、`teacher` 或 `admin`，`identifier` 去除首尾空白后为 1 至 80 个字符。学生使用真实姓名进行匹配，邮箱通过已验证记录关联到同一个用户 ID；同名学生分别用各自邮箱恢复。尚未验证邮箱的账号继续使用登录密码，登录后可补绑邮箱。已忘记密码的未绑定用户由站点运维核验身份后使用 `flask reset-password --role student OS202601-06` 恢复，教师/管理员使用相应角色和用户名。
+
+学生的作业列表、标记已读和确认提交响应中的作业对象含 `saved_files`，每项提供 `id`、`original_filename`、`status`。`GET /assignments/{assignment_id}/submissions/{submission_id}/preview` 返回 `{submission,previewable,content}`，`download` 返回原文件。两个端点仅允许所属教学班的学生读取自己在该已发布作业中的文件。在线草稿沿用 `GET /markdown-documents/{id}`。
+
 `GET /classes/public` 返回启用邀请码的班级公开信息；`GET /classes/my` 返回学生已加入班级、各班 roster 身份和完成/成绩统计。班级身份必须读 `class.student.student_id/student_no/student_number`，不能拿账号上的首个班级编号代替。
 
 `POST /admin/classes` 示例（201 `{class,roster_count}`）：

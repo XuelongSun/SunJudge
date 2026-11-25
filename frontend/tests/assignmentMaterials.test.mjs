@@ -10,13 +10,15 @@ import ts from 'typescript'
 
 const require = createRequire(import.meta.url)
 const Module = require('node:module')
+const dock = { children: [] }
 const renderer = createRenderer({
   createElement: tag => ({ tag, children: [], props: {} }), createText: text => ({ text }), createComment: text => ({ comment: text }),
   insert(node, parent, anchor) { parent.children ??= []; const index = parent.children.indexOf(anchor); parent.children.splice(index < 0 ? parent.children.length : index, 0, node); node.parent = parent },
   remove(node) { const list = node.parent?.children; if (list) list.splice(list.indexOf(node), 1) },
   setElementText(node, text) { node.text = text }, setText(node, text) { node.text = text }, setComment() {},
   patchProp(node, key, _old, value) { node.props[key] = value },
-  parentNode: node => node.parent, nextSibling: () => null
+  parentNode: node => node.parent, nextSibling: () => null,
+  querySelector: selector => selector === '#preview-test-dock' ? dock : { children: [] }
 })
 const transpile = source => ts.transpileModule(source, { compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true
@@ -27,6 +29,10 @@ markdownModule.paths = Module._nodeModulePaths(path.dirname(markdownFilename))
 markdownModule._compile(transpile(readFileSync(markdownFilename, 'utf8')), markdownFilename)
 
 const previewMessages = []
+const dialog = {
+  props: ['modelValue', 'title', 'width', 'appendToBody', 'destroyOnClose'],
+  setup: (props, { slots }) => () => props.modelValue ? h('dialog', { title: props.title }, slots.default?.()) : null
+}
 
 function loadPreviewDialog() {
   const filename = fileURLToPath(new URL('../src/components/FilePreviewDialog.vue', import.meta.url))
@@ -34,7 +40,7 @@ function loadPreviewDialog() {
   const mod = new Module(filename)
   mod.paths = Module._nodeModulePaths(path.dirname(filename))
   const originalRequire = mod.require.bind(mod)
-  mod.require = name => name === '../markdown' ? markdownModule.exports : name === 'element-plus' ? { ElMessage: { success: message => previewMessages.push({ type: 'success', message }), warning: message => previewMessages.push({ type: 'warning', message }) } } : originalRequire(name)
+  mod.require = name => name === '../markdown' ? markdownModule.exports : name === 'element-plus' ? { ElDialog: dialog, ElMessage: { success: message => previewMessages.push({ type: 'success', message }), warning: message => previewMessages.push({ type: 'warning', message }) } } : originalRequire(name)
   const script = compileScript(descriptor, { id: 'preview-dialog-test' })
   mod._compile(transpile(script.content), filename)
   const template = compileTemplate({ source: descriptor.template.content, filename, id: 'preview-dialog-test', compilerOptions: { bindingMetadata: script.bindings } })
@@ -70,7 +76,7 @@ function mountMaterials(api, files = [], renderTemplate = false, extraProps = {}
   const props = reactive({ assignmentId: 1, files, fallbackMarkdown: '# 在线说明', headerMarkdown: '# 作业信息', ...extraProps })
   const app = renderer.createApp({ render: () => h(component, props) })
   for (const name of ['el-tag', 'el-button', 'el-skeleton', 'el-alert', 'el-empty']) app.component(name, { setup: (_props, { slots }) => () => h('div', slots.default?.()) })
-  app.component('el-dialog', { props: ['modelValue', 'title', 'width', 'appendToBody', 'destroyOnClose'], setup: (props, { slots }) => () => props.modelValue ? h('dialog', { title: props.title }, [slots.default?.(), slots.footer?.()]) : null })
+  app.component('el-switch', { setup: () => () => h('input', { type: 'checkbox' }) })
   app.component('el-table', { props: ['data'], setup(props, { slots }) { provide('rows', () => props.data); return () => h('div', slots.default?.()) } })
   app.component('el-table-column', { props: ['prop', 'label', 'minWidth', 'width'], setup: (props, { slots }) => {
     const rows = inject('rows', () => [])
@@ -262,6 +268,35 @@ test('downloads use the authorized URL for saved files and a filename-preserving
 const previewNodes = root => [root, ...(root.children ?? []).flatMap(previewNodes)]
 const previewText = root => (root.text ?? '') + (root.children ?? []).map(previewText).join('')
 const copyButton = root => previewNodes(root).find(node => node.tag === 'div' && previewText(node) === '复制内容')
+
+test('Markdown can show literal source, keep the selected mode while docked, and reopen as rendered', async () => {
+  const content = '# Heading\r\n\r\n<script>literal</script>\r\n'
+  const props = reactive({ modelValue: true, filename: 'report.MD', content, dockTarget: '#preview-test-dock' })
+  const root = {}
+  const app = renderer.createApp({ render: () => h(previewDialog, props) })
+  for (const name of ['el-skeleton', 'el-alert', 'el-empty']) app.component(name, { render: () => null })
+  app.component('el-switch', { setup: () => () => h('input', { type: 'checkbox' }) })
+  app.component('el-button', { setup: (_props, { slots }) => () => h('button', slots.default?.()) })
+  app.mount(root)
+  try {
+    const switchControl = previewNodes(root).find(node => node.tag === 'input')
+    const rendered = () => previewNodes(root).find(node => node.props?.innerHTML)?.props.innerHTML
+    assert.match(rendered(), /<h1>Heading<\/h1>/)
+    switchControl.props['onUpdate:modelValue'](true)
+    await settle()
+    assert.equal(previewNodes(root).find(node => node.tag === 'pre').props.textContent, content)
+    assert.equal(rendered(), undefined)
+    previewNodes(root).find(node => node.tag === 'button' && previewText(node) === '悬停预览').props.onClick()
+    await settle()
+    assert.equal(previewNodes(dock).find(node => node.tag === 'pre').props.textContent, content)
+    props.modelValue = false
+    await settle()
+    assert.equal(previewNodes(dock).some(node => node.tag === 'aside'), false)
+    props.modelValue = true
+    await settle()
+    assert.match(rendered(), /<h1>Heading<\/h1>/)
+  } finally { app.unmount() }
+})
 function mockClipboard(writeText) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } })

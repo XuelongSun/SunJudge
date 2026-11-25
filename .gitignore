@@ -49,6 +49,7 @@ maintain.md
 
 test_cases/
 templates/
+!/backend/app/templates/
 
 # Local test reports, coverage and browser-run artifacts (keep test source files).
 .coverage

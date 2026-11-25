@@ -4,10 +4,16 @@ from http import HTTPStatus
 
 from flask import Blueprint, jsonify, request
 from flask_login import current_user, login_required, login_user, logout_user
-from sqlalchemy import or_
+from sqlalchemy import or_, update
+from sqlalchemy.exc import IntegrityError
+from werkzeug.security import generate_password_hash
 
 from ..extensions import db
-from ..models import ClassRoster, CourseClass, CourseMember, User
+from ..models import AccountRecovery, ClassRoster, CourseClass, CourseMember, User, utc_now
+from ..services.account_recovery import (
+    code_digest, consume_code, email_enabled, issue_code, normalize_email,
+    queue_code, recovery_account_query, recovery_display_name,
+)
 from ..services.accounts import StudentIdError, validate_student_id
 
 
@@ -215,3 +221,133 @@ def me():
     if current_user.is_authenticated:
         return jsonify({"user": current_user.to_dict()})
     return jsonify({"user": None})
+
+
+def _recovery_payload() -> dict:
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _recovery_identity(payload: dict) -> tuple[str, str] | None:
+    role, identifier = payload.get("role"), payload.get("identifier")
+    if role not in (User.ROLE_STUDENT, User.ROLE_TEACHER, User.ROLE_ADMIN) or not isinstance(identifier, str):
+        return None
+    identifier = identifier.strip()
+    return (role, identifier) if 0 < len(identifier) <= 80 else None
+
+
+@auth_bp.get("/recovery/email")
+@login_required
+def recovery_email():
+    recovery = db.session.get(AccountRecovery, current_user.id)
+    response = jsonify(email=recovery.email if recovery else None, enabled=email_enabled())
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@auth_bp.post("/recovery/email/request")
+@login_required
+def request_recovery_email():
+    if not email_enabled():
+        return jsonify(message="站点尚未启用邮件服务。"), HTTPStatus.SERVICE_UNAVAILABLE
+    payload = _recovery_payload()
+    email, password = normalize_email(payload.get("email")), payload.get("password")
+    if not email:
+        return jsonify(message="请输入有效邮箱。"), HTTPStatus.BAD_REQUEST
+    if not isinstance(password, str) or not 6 <= len(password) <= 1024 or not current_user.check_password(password):
+        return jsonify(message="当前密码错误。"), HTTPStatus.FORBIDDEN
+    user_id = current_user.id
+    # Serialize with password resets before issuing a new binding code.
+    locked = db.session.execute(update(User).where(
+        User.id == user_id, User.password_hash == current_user.password_hash,
+    ).values(password_hash=User.password_hash)).rowcount
+    if locked != 1:
+        db.session.rollback()
+        return jsonify(message="请重新登录。"), HTTPStatus.UNAUTHORIZED
+    recovery = db.session.get(AccountRecovery, user_id)
+    if not recovery:
+        recovery = AccountRecovery(user_id=user_id)
+        db.session.add(recovery)
+        db.session.flush()
+    code = issue_code(recovery, email, binding=True)
+    if not code:
+        return jsonify(message="请间隔一分钟再发送验证码。"), HTTPStatus.TOO_MANY_REQUESTS
+    if not queue_code(email, code, binding=True, recipient_name=recovery_display_name(current_user)):
+        return jsonify(message="邮件发送繁忙，请稍后重试。"), HTTPStatus.SERVICE_UNAVAILABLE
+    return jsonify(message="验证邮件已安排发送，请检查收件箱。"), HTTPStatus.ACCEPTED
+
+
+@auth_bp.post("/recovery/email/confirm")
+@login_required
+def confirm_recovery_email():
+    payload = _recovery_payload()
+    email, digest = normalize_email(payload.get("email")), code_digest(payload.get("code"))
+    if not email or not digest:
+        return jsonify(message="邮箱或验证码无效。"), HTTPStatus.BAD_REQUEST
+    try:
+        if not consume_code(current_user.id, email, digest, binding=True):
+            db.session.commit()
+            return jsonify(message="验证码无效、已过期或尝试次数已用完，请重新获取。"), HTTPStatus.BAD_REQUEST
+        changed = db.session.execute(update(AccountRecovery).where(
+            AccountRecovery.user_id == current_user.id, AccountRecovery.pending_email == email,
+        ).values(
+            email=email, pending_email=None, binding_digest=None, binding_expires_at=None,
+            binding_attempts=0, reset_digest=None, reset_expires_at=None, reset_attempts=0,
+        ).execution_options(synchronize_session=False)).rowcount
+        if changed != 1:
+            db.session.rollback()
+            return jsonify(message="验证码无效或已过期。"), HTTPStatus.BAD_REQUEST
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify(message="该邮箱已绑定其他账号。"), HTTPStatus.CONFLICT
+    return jsonify(email=email, message="找回邮箱已验证。")
+
+
+@auth_bp.post("/recovery/password/request")
+def request_password_reset():
+    if not email_enabled():
+        return jsonify(message="站点尚未启用邮件服务。"), HTTPStatus.SERVICE_UNAVAILABLE
+    payload = _recovery_payload()
+    email = normalize_email(payload.get("email"))
+    if not email:
+        return jsonify(message="请输入有效邮箱。"), HTTPStatus.BAD_REQUEST
+    identity = _recovery_identity(payload)
+    if not identity:
+        return jsonify(message="请选择账号类型，并填写教师/管理员用户名或学生真实姓名。"), HTTPStatus.BAD_REQUEST
+    recovery = recovery_account_query(email, *identity).first()
+    if recovery:
+        code = issue_code(recovery, email, binding=False)
+        if code:
+            user = db.session.get(User, recovery.user_id)
+            queue_code(email, code, binding=False, recipient_name=recovery_display_name(user))
+    return jsonify(message="如果账号信息与已绑定邮箱匹配，你将收到密码重置邮件。"), HTTPStatus.ACCEPTED
+
+
+@auth_bp.post("/recovery/password/confirm")
+def confirm_password_reset():
+    payload = _recovery_payload()
+    email = normalize_email(payload.get("email"))
+    digest = code_digest(payload.get("code"))
+    password = payload.get("password")
+    if not isinstance(password, str) or not 6 <= len(password) <= 1024:
+        return jsonify(message="新密码长度须为 6 至 1024 个字符。"), HTTPStatus.BAD_REQUEST
+    invalid = {"message": "账号信息或验证码无效、已过期或尝试次数已用完，请重新获取。"}
+    identity = _recovery_identity(payload)
+    if not email or not digest or not identity:
+        return jsonify(invalid), HTTPStatus.BAD_REQUEST
+    recovery = recovery_account_query(email, *identity).first()
+    if not recovery:
+        return jsonify(invalid), HTTPStatus.BAD_REQUEST
+    user_id = recovery.user_id
+    if not consume_code(user_id, email, digest, binding=False):
+        db.session.commit()
+        return jsonify(invalid), HTTPStatus.BAD_REQUEST
+    db.session.execute(update(User).where(User.id == user_id).values(password_hash=generate_password_hash(password)))
+    now = utc_now()
+    db.session.execute(update(AccountRecovery).where(AccountRecovery.user_id == user_id).values(
+        reset_digest=None, reset_expires_at=None, reset_attempts=0, password_reset_at=now,
+        pending_email=None, binding_digest=None, binding_expires_at=None, binding_attempts=0,
+    ).execution_options(synchronize_session=False))
+    db.session.commit()
+    return jsonify(message="密码已重置，请用新密码登录。")
